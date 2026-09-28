@@ -54,6 +54,9 @@ class ExperimentConfig:
     accelerator: str = "auto"
     precision: str = "32-true"
     deterministic: bool = True
+    train_batches: int = 1024
+    val_batches: int = 1024
+    test_batches: int = 1024
     print_every_n_epochs: int = 5
     augments: AugmentConfig = field(default_factory=AugmentConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
