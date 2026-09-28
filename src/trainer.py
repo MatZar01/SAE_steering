@@ -168,6 +168,9 @@ def run_experiment(config: ExperimentConfig) -> Path:
         check_val_every_n_epoch=1, log_every_n_steps=1,
         logger=logger,
         callbacks=[checkpoint],
+        limit_train_batches=config.train_batches,
+        limit_val_batches=config.val_batches,
+        limit_test_batches=config.test_batches,
     )
     trainer.fit(module, datamodule=data)
     # Explicitly save the final state: save_last behavior varies across Lightning versions.
