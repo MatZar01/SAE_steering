@@ -1,8 +1,6 @@
-"""CSV-labeled images, reproducible stratified splits, and ordered export data."""
+"""Class-folder image datasets for training, evaluation, and ordered export."""
 
-import csv
 import os
-import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,34 +13,29 @@ from cfgs.cfg import ExperimentConfig
 from src.augments import build_transforms
 
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+
+
 @dataclass(frozen=True)
 class ImageRecord:
     path: Path
     label: str
 
 
-def read_records(csv_path: Path, image_dir: Path, extension: str) -> list[ImageRecord]:
-    records, seen = [], set()
-    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        if not {"id", "label"}.issubset(reader.fieldnames or []):
-            raise ValueError(f"{csv_path} must contain id,label columns.")
-        for row in reader:
-            image_id, label = (row.get("id") or "").strip(), (row.get("label") or "").strip()
-            if not image_id or not label:
-                raise ValueError(f"Empty id or label in {csv_path}.")
-            filename = image_id if Path(image_id).suffix else image_id + extension
-            path = (image_dir / filename).resolve()
-            if not path.is_relative_to(image_dir.resolve()):
-                raise ValueError(f"Image id escapes the image directory: {image_id}")
-            if path in seen:
-                raise ValueError(f"Duplicate image in {csv_path}: {image_id}")
-            if not path.is_file():
-                raise FileNotFoundError(path)
-            seen.add(path)
-            records.append(ImageRecord(path, label))
-    if not records:
-        raise ValueError(f"No labeled images in {csv_path}.")
+def read_records(split_dir: Path) -> list[ImageRecord]:
+    """Read images directly below each class folder in deterministic path order."""
+    if not split_dir.is_dir():
+        raise NotADirectoryError(split_dir)
+    classes = sorted(path for path in split_dir.iterdir() if path.is_dir())
+    if not classes:
+        raise ValueError(f"No class directories found in {split_dir}.")
+    records = []
+    for class_dir in classes:
+        images = sorted(path for path in class_dir.iterdir()
+                        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS)
+        if not images:
+            raise ValueError(f"No supported images found in class directory {class_dir}.")
+        records.extend(ImageRecord(path, class_dir.name) for path in images)
     return records
 
 
@@ -75,43 +68,26 @@ class ImageDataModule(pl.LightningDataModule):
             return
         cfg = self.config
         dataset = cfg.resolve(cfg.dataset_path)
-        self.all_records = read_records(dataset / cfg.train_labels_csv,
-                                        dataset / cfg.train_dir, cfg.image_extension)
+        self.train_records = read_records(dataset / "train")
+        self.eval_records = read_records(dataset / "test")
         self.class_to_idx = {label: i for i, label in
-                             enumerate(sorted({r.label for r in self.all_records}))}
+                             enumerate(sorted({r.label for r in self.train_records}))}
         if len(self.class_to_idx) < 2:
-            raise ValueError("Classification requires at least two classes.")
-        if cfg.test_labels_csv:
-            self.train_records = self.all_records
-            self.eval_records = read_records(dataset / cfg.test_labels_csv,
-                                             dataset / cfg.test_dir, cfg.image_extension)
-            unknown = {r.label for r in self.eval_records} - self.class_to_idx.keys()
-            if unknown:
-                raise ValueError(f"Unknown test labels: {sorted(unknown)}")
-            if {r.path for r in self.train_records} & {r.path for r in self.eval_records}:
-                raise ValueError("Training and evaluation images must not overlap.")
-            self.evaluation_source = "labeled_test"
-        else:
-            rng = random.Random(cfg.seed)
-            held_out = set()
-            for label in self.class_to_idx:
-                indices = [i for i, r in enumerate(self.all_records) if r.label == label]
-                if len(indices) < 2:
-                    raise ValueError(f"Class {label!r} needs at least two images for a holdout.")
-                rng.shuffle(indices)
-                count = min(len(indices) - 1, max(1, round(len(indices) * cfg.holdout_fraction)))
-                held_out.update(indices[:count])
-            self.train_records = [r for i, r in enumerate(self.all_records) if i not in held_out]
-            self.eval_records = [r for i, r in enumerate(self.all_records) if i in held_out]
-            self.evaluation_source = "stratified_train_holdout"
+            raise ValueError("Classification requires at least two training classes.")
+        unknown = {r.label for r in self.eval_records} - self.class_to_idx.keys()
+        if unknown:
+            raise ValueError(f"Unknown test classes: {sorted(unknown)}")
         train_transform = build_transforms(cfg.augments, training=True)
         eval_transform = build_transforms(cfg.augments)
+        root_dir = cfg.root_dir.resolve()
         self.train_dataset = ImageDataset(self.train_records, self.class_to_idx,
-                                           train_transform, cfg.root_dir)
+                                          train_transform, root_dir)
         self.eval_dataset = ImageDataset(self.eval_records, self.class_to_idx,
-                                          eval_transform, cfg.root_dir)
-        self.export_dataset = ImageDataset(self.all_records, self.class_to_idx,
-                                            eval_transform, cfg.root_dir)
+                                         eval_transform, root_dir)
+        self.export_datasets = {
+            "train": ImageDataset(self.train_records, self.class_to_idx, eval_transform, root_dir),
+            "test": ImageDataset(self.eval_records, self.class_to_idx, eval_transform, root_dir),
+        }
         self._ready = True
 
     def _loader(self, dataset, shuffle=False):
@@ -130,5 +106,5 @@ class ImageDataModule(pl.LightningDataModule):
     def val_dataloader(self):
         return self._loader(self.eval_dataset)
 
-    def export_dataloader(self):
-        return self._loader(self.export_dataset)
+    def export_dataloader(self, split: str):
+        return self._loader(self.export_datasets[split])

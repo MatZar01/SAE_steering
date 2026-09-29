@@ -28,21 +28,32 @@ use deterministic resize/center crop and ImageNet normalization.
 The default layout is:
 
 ```text
-DS/cifar-10/
-  train/1.png ...
-  test/1.png ...
-  trainLabels.csv       # id,label
+DS/cifar10/
+  train/
+    airplane/
+      0001.png
+    automobile/
+      0001.png
+    ...
+  test/
+    airplane/
+      0001.png
+    automobile/
+      0001.png
+    ...
 ```
 
-Only training labels are supplied in this dataset. By default, a reproducible,
-stratified 10% holdout of the labeled images supplies validation metrics; the
-unlabeled `test/` images cannot supply loss or accuracy. Console summaries call
-these metrics `val`. To use labeled test images, set `test_labels_csv` in the
-config, or pass `--test-labels-csv testLabels.csv`, with the same `id,label`
-schema. In that mode, all training rows are used for training and console
-summaries call evaluation metrics `test`. Because evaluation loss controls the
-scheduler and best checkpoint, this evaluation set acts as validation; reserve
-a separate untouched set if you need an unbiased final test score.
+Each image lives directly in its class directory. The directory name is its
+label; matching class names across `train/` and `test/` get the same integer
+label. Supported formats are PNG, JPEG, BMP, WebP, and TIFF. Class directories
+and filenames are sorted for reproducible exports. Set `dataset_path` in
+`cfgs/cfg.py` or pass `--dataset-path` to use another dataset root.
+
+All images in `train/` are used for training, and the labeled images in `test/`
+supply evaluation metrics. Test classes must also exist in `train/`. Console
+summaries call these metrics `test`. Because evaluation loss controls the
+scheduler and best checkpoint, reserve a separate untouched set if you need an
+unbiased final test score.
 
 Evaluation runs every epoch and ReduceLROnPlateau monitors `eval_loss`. The
 progress bar and model summary are disabled. Only train/evaluation loss and
@@ -56,35 +67,38 @@ training batch is dropped for BatchNorm; evaluation and export retain every row.
 Each run creates `log_dir/YYMMDD-hh_mm_ss/` containing:
 
 ```text
-config.json            # configuration, evaluation source, counts, versions
+config.json            # configuration, image counts, versions
 class_to_idx.json      # stable alphabetical label -> integer mapping
-split.csv              # exact train/evaluation membership
 hparams.yaml
 metrics.csv            # train/evaluation metrics and learning rate
 checkpoints/           # best evaluation-loss checkpoint and last.ckpt
 out/
-  embeddings.pt        # float32 tensor [N, 512] for ResNet-18
-  labels.pt            # int64 tensor [N]
-  image_paths.csv      # image_path header, then N paths relative to project root
+  embeddings_train.pt  # float32 tensor [N_train, 512] for ResNet-18
+  labels_train.pt      # int64 tensor [N_train]
+  image_paths_train.csv
+  embeddings_test.pt   # float32 tensor [N_test, 512] for ResNet-18
+  labels_test.pt       # int64 tensor [N_test]
+  image_paths_test.csv
 ```
 
-All three exports follow the original `trainLabels.csv` row order, including
-any held-out training images. Row `i` of `embeddings.pt`, element `i` of
-`labels.pt`, and data row `i` of `image_paths.csv` refer to the same image.
+Each split's three files contain its images in sorted class/filename order.
+Row `i` of `embeddings_<split>.pt`, element `i` of `labels_<split>.pt`, and
+data row `i` of `image_paths_<split>.csv` refer to the same image. The CSVs
+have an `image_path` header and paths relative to the project root.
 Embeddings come from the final epoch's pooled features immediately before the
-classifier, with augmentation disabled. `class_to_idx.json` decodes labels and
-`split.csv` identifies which exported images were held out.
+classifier, with augmentation disabled. `class_to_idx.json` decodes labels.
 
 ```python
 import csv
 import torch
 
 run = "log_dir/YYMMDD-hh_mm_ss"
-embeddings = torch.load(f"{run}/out/embeddings.pt", weights_only=True)
-labels = torch.load(f"{run}/out/labels.pt", weights_only=True)
-with open(f"{run}/out/image_paths.csv", newline="") as f:
-    paths = [row["image_path"] for row in csv.DictReader(f)]
-assert len(embeddings) == len(labels) == len(paths)
+for split in ("train", "test"):
+    embeddings = torch.load(f"{run}/out/embeddings_{split}.pt", weights_only=True)
+    labels = torch.load(f"{run}/out/labels_{split}.pt", weights_only=True)
+    with open(f"{run}/out/image_paths_{split}.csv", newline="") as f:
+        paths = [row["image_path"] for row in csv.DictReader(f)]
+    assert len(embeddings) == len(labels) == len(paths)
 ```
 
 ## Sparse autoencoders
@@ -118,8 +132,9 @@ These adaptations follow the [Overcomplete BatchTopK implementation](https://git
 A small compatibility alias supports Overcomplete's plotting imports with recent
 Matplotlib versions; no environment downgrade is needed.
 
-The SAE reads `out/embeddings.pt` directly, infers its input dimension, and uses
-raw embeddings without additional normalization. The default hidden dimension
+The SAE reads `out/embeddings_train.pt` directly, infers its input dimension,
+and uses raw training embeddings without additional normalization. Test
+embeddings remain available for separate analysis. The default hidden dimension
 is 2048. A seeded 10% embedding holdout is used for validation and the plateau
 scheduler; its row indices are saved. The image labels are not used. The progress
 bar stays disabled and reconstruction loss, MSE, and mean active-feature count
@@ -143,7 +158,7 @@ Print hidden SAE embeddings for images in a directory (searched recursively):
 ```bash
 python test_sae.py \
   --log-dir log_dir/<image-run>/SAE/<sae-run> \
-  --images-dir DS/cifar-10/test \
+  --images-dir DS/cifar10/test \
   --device cpu
 ```
 

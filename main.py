@@ -16,7 +16,6 @@ def main():
     parser.add_argument("--model-name")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--accelerator", choices=["auto", "cpu", "gpu", "mps"])
-    parser.add_argument("--test-labels-csv", help="Labeled test CSV, relative to dataset directory")
     parser.add_argument("--no-pretrained", action="store_true", help="Disable weight download for offline runs")
     args = parser.parse_args()
     config = deepcopy(CONFIG)

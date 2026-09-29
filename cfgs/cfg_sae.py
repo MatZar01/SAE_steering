@@ -9,7 +9,7 @@ from cfgs.cfg import ROOT_DIR, SchedulerConfig
 @dataclass
 class SAEConfig:
     root_dir: Path = ROOT_DIR
-    # Set this to the image experiment containing out/embeddings.pt.
+    # Set this to the image experiment containing out/embeddings_train.pt.
     model_log_dir: str = ""
     model_name: str = "basic"  # basic, topk, batch_topk
     nb_concepts: int = 2048

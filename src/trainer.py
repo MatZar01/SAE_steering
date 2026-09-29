@@ -3,7 +3,6 @@
 import csv
 import json
 import logging
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,13 +19,10 @@ from src.scheduler import build_scheduler
 
 
 class Classifier(pl.LightningModule):
-    def __init__(self, config: ExperimentConfig, num_classes: int,
-                 evaluation_source: str = "stratified_train_holdout"):
+    def __init__(self, config: ExperimentConfig, num_classes: int):
         super().__init__()
         self.config = config
-        self.evaluation_source = evaluation_source
-        self.save_hyperparameters({"config": config.to_dict(), "num_classes": num_classes,
-                                   "evaluation_source": evaluation_source})
+        self.save_hyperparameters({"config": config.to_dict(), "num_classes": num_classes})
         self.model = build_model(config.model_name, num_classes, config.pretrained)
         self.register_buffer("train_totals", torch.zeros(3, dtype=torch.float64), persistent=False)
         self.register_buffer("eval_totals", torch.zeros(3, dtype=torch.float64), persistent=False)
@@ -67,10 +63,9 @@ class Classifier(pl.LightningModule):
         epoch = self.current_epoch + 1
         if epoch % self.config.print_every_n_epochs == 0:
             eval_loss, eval_accuracy = self.eval_totals[:2] / self.eval_totals[2]
-            name = "test" if self.evaluation_source == "labeled_test" else "val"
             print(f"Epoch {epoch:03d} | train loss={train_loss.item():.4f} "
                   f"accuracy={train_accuracy.item():.4f} | "
-                  f"{name} loss={eval_loss.item():.4f} accuracy={eval_accuracy.item():.4f}",
+                  f"test loss={eval_loss.item():.4f} accuracy={eval_accuracy.item():.4f}",
                   flush=True)
 
     def configure_optimizers(self):
@@ -94,50 +89,49 @@ def create_run_dir(base: Path) -> Path:
 
 def save_metadata(run_dir: Path, config: ExperimentConfig, data: ImageDataModule):
     metadata = config.to_dict()
-    metadata.update(evaluation_source=data.evaluation_source,
-                    num_train_images=len(data.train_records),
+    metadata.update(num_train_images=len(data.train_records),
                     num_evaluation_images=len(data.eval_records),
-                    num_export_images=len(data.all_records),
+                    num_export_train_images=len(data.export_datasets["train"]),
+                    num_export_test_images=len(data.export_datasets["test"]),
                     embedding_checkpoint="final_epoch",
-                    embedding_order="train_labels_csv row order",
+                    embedding_order="sorted class/filename within each split",
                     torch_version=torch.__version__, lightning_version=pl.__version__)
     (run_dir / "config.json").write_text(json.dumps(metadata, indent=2) + "\n")
     (run_dir / "class_to_idx.json").write_text(json.dumps(data.class_to_idx, indent=2) + "\n")
-    with (run_dir / "split.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["image_path", "label", "split"])
-        for split, records in (("train", data.train_records), ("eval", data.eval_records)):
-            for record in records:
-                relative = Path(os.path.relpath(record.path, config.root_dir)).as_posix()
-                writer.writerow([relative, data.class_to_idx[record.label], split])
 
 
 @torch.inference_mode()
 def export_embeddings(module: Classifier, data: ImageDataModule, out_dir: Path):
-    """Export every labeled training image, including holdout rows, in CSV order."""
+    """Export both splits with deterministic preprocessing and path order."""
     out_dir.mkdir(parents=True, exist_ok=True)
     was_training = module.training
     module.eval()
-    count = len(data.export_dataset)
-    embeddings = torch.empty(count, module.model.embedding_dim, dtype=torch.float32)
-    labels = torch.empty(count, dtype=torch.long)
-    offset = 0
     try:
-        with (out_dir / "image_paths.csv.tmp").open("w", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["image_path"])
-            for images, batch_labels, paths in data.export_dataloader():
-                features = module.model.forward_features(images.to(module.device))
-                end = offset + len(batch_labels)
-                embeddings[offset:end] = features.cpu().float()
-                labels[offset:end] = batch_labels
-                writer.writerows((path,) for path in paths)
-                offset = end
-        if offset != count:
-            raise RuntimeError(f"Exported {offset} images; expected {count}.")
-        torch.save(embeddings, out_dir / "embeddings.pt.tmp")
-        torch.save(labels, out_dir / "labels.pt.tmp")
-        for filename in ("embeddings.pt", "labels.pt", "image_paths.csv"):
+        filenames = []
+        for split in ("train", "test"):
+            count = len(data.export_datasets[split])
+            embeddings = torch.empty(count, module.model.embedding_dim, dtype=torch.float32)
+            labels = torch.empty(count, dtype=torch.long)
+            offset = 0
+            paths_name = f"image_paths_{split}.csv"
+            with (out_dir / (paths_name + ".tmp")).open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["image_path"])
+                for images, batch_labels, paths in data.export_dataloader(split):
+                    features = module.model.forward_features(images.to(module.device))
+                    end = offset + len(batch_labels)
+                    embeddings[offset:end] = features.cpu().float()
+                    labels[offset:end] = batch_labels
+                    writer.writerows((path,) for path in paths)
+                    offset = end
+            if offset != count:
+                raise RuntimeError(f"Exported {offset} {split} images; expected {count}.")
+            embeddings_name = f"embeddings_{split}.pt"
+            labels_name = f"labels_{split}.pt"
+            torch.save(embeddings, out_dir / (embeddings_name + ".tmp"))
+            torch.save(labels, out_dir / (labels_name + ".tmp"))
+            filenames.extend((embeddings_name, labels_name, paths_name))
+        for filename in filenames:
             (out_dir / (filename + ".tmp")).replace(out_dir / filename)
     finally:
         module.train(was_training)
@@ -151,7 +145,7 @@ def run_experiment(config: ExperimentConfig) -> Path:
     pl.seed_everything(config.seed, workers=True, verbose=False)
     data = ImageDataModule(config)
     data.setup()
-    module = Classifier(config, len(data.class_to_idx), data.evaluation_source)
+    module = Classifier(config, len(data.class_to_idx))
     run_dir = create_run_dir(config.resolve(config.log_dir))
     logger = CSVLogger(save_dir=str(run_dir), name="", version="")
     # Initialize in the empty directory before writing our own experiment metadata.
@@ -170,7 +164,6 @@ def run_experiment(config: ExperimentConfig) -> Path:
         callbacks=[checkpoint],
         limit_train_batches=config.train_batches,
         limit_val_batches=config.val_batches,
-        limit_test_batches=config.test_batches,
     )
     trainer.fit(module, datamodule=data)
     # Explicitly save the final state: save_last behavior varies across Lightning versions.

@@ -81,12 +81,12 @@ class SAETrainer(pl.LightningModule):
 def run_sae_experiment(config: SAEConfig) -> Path:
     config.validate()
     source = config.source_dir()
-    embedding_path = source / "out" / "embeddings.pt"
+    embedding_path = source / "out" / "embeddings_train.pt"
     if not embedding_path.is_file():
         raise FileNotFoundError(f"Missing {embedding_path}. Finish the image experiment's export first.")
     embeddings = torch.load(embedding_path, map_location="cpu", weights_only=True)
     if not isinstance(embeddings, torch.Tensor) or embeddings.ndim != 2:
-        raise ValueError("embeddings.pt must contain a tensor of shape [N, D].")
+        raise ValueError("embeddings_train.pt must contain a tensor of shape [N, D].")
     if min(embeddings.shape) < 1 or len(embeddings) < 2 or not embeddings.is_floating_point():
         raise ValueError("Require at least two floating-point embeddings with nonempty features.")
     embeddings = embeddings.detach().float().contiguous()

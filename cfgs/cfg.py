@@ -34,14 +34,7 @@ class SchedulerConfig:
 @dataclass
 class ExperimentConfig:
     root_dir: Path = ROOT_DIR
-    dataset_path: str = "DS/cifar-10"
-    train_dir: str = "train"
-    test_dir: str = "test"
-    train_labels_csv: str = "trainLabels.csv"
-    # Set to a CSV with id,label columns to evaluate labeled test images.
-    test_labels_csv: str | None = None
-    image_extension: str = ".png"
-    holdout_fraction: float = 0.1
+    dataset_path: str = "DS/cifar10"
     log_dir: str = "log_dir"
     model_name: str = "resnet18"
     pretrained: bool = True
@@ -56,7 +49,6 @@ class ExperimentConfig:
     deterministic: bool = True
     train_batches: int = 1024
     val_batches: int = 1024
-    test_batches: int = 1024
     print_every_n_epochs: int = 5
     augments: AugmentConfig = field(default_factory=AugmentConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -72,8 +64,6 @@ class ExperimentConfig:
     def validate(self) -> None:
         if self.epochs < 1 or self.batch_size < 2 or self.num_workers < 0:
             raise ValueError("epochs >= 1, batch_size >= 2 and num_workers >= 0 are required.")
-        if not 0 < self.holdout_fraction < 1:
-            raise ValueError("holdout_fraction must be between 0 and 1.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise ValueError("learning_rate must be positive and weight_decay nonnegative.")
         if self.print_every_n_epochs < 1 or self.augments.image_size < 32:

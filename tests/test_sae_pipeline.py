@@ -54,7 +54,8 @@ class SAEPipelineTest(unittest.TestCase):
                 torch.testing.assert_close(together, separate)
 
     def test_all_variants_train_save_load(self):
-        torch.save(torch.randn(13, 8), self.root / "out/embeddings.pt")
+        torch.save(torch.randn(13, 8), self.root / "out/embeddings_train.pt")
+        torch.save(torch.randn(3, 7), self.root / "out/embeddings_test.pt")
         for name in ("basic", "topk", "batch_topk"):
             with self.subTest(name=name):
                 cfg = SAEConfig(model_log_dir=str(self.root), model_name=name,
@@ -89,7 +90,7 @@ class SAEPipelineTest(unittest.TestCase):
         images_dir.mkdir()
         image = Image.new("RGB", (40, 50), (20, 100, 200))
         image.save(images_dir / "sample.png")
-        torch.save(torch.randn(5, 512), self.root / "out/embeddings.pt")
+        torch.save(torch.randn(5, 512), self.root / "out/embeddings_train.pt")
         run = run_sae_experiment(SAEConfig(model_log_dir=str(self.root), model_name="batch_topk",
                                            nb_concepts=16, top_k=3, epochs=1, batch_size=3,
                                            accelerator="cpu"))
@@ -105,7 +106,8 @@ class SAEPipelineTest(unittest.TestCase):
         self.assertEqual(resolve_sae_run(self.root / "SAE"), run)
 
     def test_invalid_embeddings(self):
-        torch.save(torch.tensor([[float("nan"), 0.0], [1.0, 0.0]]), self.root / "out/embeddings.pt")
+        torch.save(torch.tensor([[float("nan"), 0.0], [1.0, 0.0]]),
+                   self.root / "out/embeddings_train.pt")
         with self.assertRaisesRegex(ValueError, "NaN"):
             run_sae_experiment(SAEConfig(model_log_dir=str(self.root)))
 
