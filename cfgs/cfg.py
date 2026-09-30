@@ -1,5 +1,6 @@
 """Edit CONFIG below to configure the default experiment."""
 
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -49,6 +50,7 @@ class ExperimentConfig:
     deterministic: bool = True
     train_batches: int = 1024
     val_batches: int = 1024
+    sae_smples: float | None = None  # Percent per split (e.g. 25.0); None embeds all images.
     print_every_n_epochs: int = 5
     augments: AugmentConfig = field(default_factory=AugmentConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -68,6 +70,12 @@ class ExperimentConfig:
             raise ValueError("learning_rate must be positive and weight_decay nonnegative.")
         if self.print_every_n_epochs < 1 or self.augments.image_size < 32:
             raise ValueError("Print interval must be positive; image_size must be at least 32.")
+        if self.sae_smples is not None and (
+            type(self.sae_smples) not in (int, float)
+            or not math.isfinite(self.sae_smples)
+            or not 0 < self.sae_smples <= 100
+        ):
+            raise ValueError("sae_smples must be a percentage in (0, 100] or None.")
         if not 0 < self.scheduler.factor < 1:
             raise ValueError("Scheduler factor must be between 0 and 1.")
 

@@ -87,6 +87,14 @@ data row `i` of `image_paths_<split>.csv` refer to the same image. The CSVs
 have an `image_path` header and paths relative to the project root.
 Embeddings come from the final epoch's pooled features immediately before the
 classifier, with augmentation disabled. `class_to_idx.json` decodes labels.
+Set `sae_smples` in `cfgs/cfg.py` (or pass `--sae-smples`) to a percentage from
+greater than 0 through 100 (for example, `25.0` exports about a quarter of each
+split). Each split's count is rounded to the nearest image, with a minimum of
+one. The selection is seeded, balanced across classes as far as each class
+allows, and Gaussian-weighted toward the middle of each class's
+sorted filenames. Selected rows retain sorted class/filename order. The default
+`None` exports every image; classifier training and evaluation always use their
+full splits.
 
 ```python
 import csv

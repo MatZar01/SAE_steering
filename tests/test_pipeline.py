@@ -13,7 +13,7 @@ from PIL import Image
 
 from cfgs.cfg import AugmentConfig, ExperimentConfig, SchedulerConfig
 from src.data import ImageDataModule
-from src.trainer import Classifier, run_experiment
+from src.trainer import Classifier, export_embeddings, run_experiment
 
 
 class PipelineTest(unittest.TestCase):
@@ -52,6 +52,63 @@ class PipelineTest(unittest.TestCase):
         Image.new("RGB", (32, 32)).save(unknown / "sample.png")
         with self.assertRaisesRegex(ValueError, "Unknown test classes"):
             ImageDataModule(self.config).setup()
+
+    def test_sae_export_samples_each_split_without_reducing_training_data(self):
+        self.config.sae_smples = 40.0
+        unequal = ImageDataModule(self.config)
+        unequal.setup()
+        self.assertEqual(len(unequal.export_datasets["train"]), 5)
+        self.assertEqual(len(unequal.export_datasets["test"]), 1)
+
+        for label in ("ant", "zebra"):
+            for i in range(5):
+                Image.new("RGB", (32, 32)).save(
+                    self.root / "DS" / "test" / label / f"{i:02}.png")
+        data = ImageDataModule(self.config)
+        data.setup()
+        self.assertEqual(len(data.train_dataset), 12)
+        self.assertEqual(len(data.eval_dataset), 12)
+        for split in ("train", "test"):
+            records = data.export_datasets[split].records
+            self.assertEqual(len(records), 5)
+            self.assertEqual([record.label for record in records].count("ant"), 3)
+            self.assertEqual([record.label for record in records].count("zebra"), 2)
+            self.assertEqual(len({record.path for record in records}), 5)
+            self.assertEqual(records, sorted(records, key=lambda record: record.path))
+            repeated = ImageDataModule(self.config)
+            repeated.setup()
+            self.assertEqual(records, repeated.export_datasets[split].records)
+
+        module = Classifier(self.config, len(data.class_to_idx))
+        export_dir = self.root / "sampled_out"
+        export_embeddings(module, data, export_dir)
+        for split in ("train", "test"):
+            records = data.export_datasets[split].records
+            embeddings = torch.load(export_dir / f"embeddings_{split}.pt", weights_only=True)
+            labels = torch.load(export_dir / f"labels_{split}.pt", weights_only=True)
+            with (export_dir / f"image_paths_{split}.csv").open(newline="") as handle:
+                paths = [row["image_path"] for row in csv.DictReader(handle)]
+            self.assertEqual(embeddings.shape, (5, 512))
+            self.assertEqual(labels.tolist(), [data.class_to_idx[record.label] for record in records])
+            self.assertEqual(paths, [record.path.relative_to(self.root).as_posix()
+                                     for record in records])
+
+        self.config.sae_smples = 12.5
+        fractional = ImageDataModule(self.config)
+        fractional.setup()
+        self.assertEqual(len(fractional.export_datasets["train"]), 2)
+        self.assertEqual(len(fractional.export_datasets["test"]), 2)
+
+        for percentage in (None, 100.0):
+            self.config.sae_smples = percentage
+            complete = ImageDataModule(self.config)
+            complete.setup()
+            self.assertEqual(len(complete.export_datasets["train"]), 12)
+            self.assertEqual(len(complete.export_datasets["test"]), 12)
+        for percentage in (0, 101, float("nan"), "50"):
+            self.config.sae_smples = percentage
+            with self.assertRaisesRegex(ValueError, "percentage"):
+                self.config.validate()
 
     def test_training_metrics_and_aligned_final_embeddings(self):
         output = io.StringIO()

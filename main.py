@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--model-name")
     parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--sae-smples", type=float, help="Percentage of each split to embed (0 < value <= 100)")
     parser.add_argument("--accelerator", choices=["auto", "cpu", "gpu", "mps"])
     parser.add_argument("--no-pretrained", action="store_true", help="Disable weight download for offline runs")
     args = parser.parse_args()

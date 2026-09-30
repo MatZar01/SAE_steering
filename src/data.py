@@ -1,6 +1,9 @@
 """Class-folder image datasets for training, evaluation, and ordered export."""
 
+import heapq
+import math
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +40,51 @@ def read_records(split_dir: Path) -> list[ImageRecord]:
             raise ValueError(f"No supported images found in class directory {class_dir}.")
         records.extend(ImageRecord(path, class_dir.name) for path in images)
     return records
+
+
+def select_export_records(records: list[ImageRecord], percentage: float | None,
+                          seed: int) -> list[ImageRecord]:
+    """Balance exports across classes, drawing unique Gaussian-weighted images per class."""
+    if percentage is None:
+        return records
+    if (type(percentage) not in (int, float) or not math.isfinite(percentage)
+            or not 0 < percentage <= 100):
+        raise ValueError("sae_smples must be a percentage in (0, 100] or None.")
+    if percentage == 100:
+        return records
+    count = max(1, math.floor(len(records) * percentage / 100 + 0.5))
+
+    by_label: dict[str, list[ImageRecord]] = {}
+    for record in records:
+        by_label.setdefault(record.label, []).append(record)
+    labels = sorted(by_label)
+    quotas = dict.fromkeys(labels, 0)
+    remaining = count
+    while remaining:
+        for label in labels:
+            if quotas[label] < len(by_label[label]):
+                quotas[label] += 1
+                remaining -= 1
+                if remaining == 0:
+                    break
+
+    rng = random.Random(seed)
+    selected = set()
+    for label in labels:
+        group = by_label[label]
+        quota = quotas[label]
+        if quota == len(group):
+            selected.update(group)
+            continue
+
+        def draw_key(index: int) -> float:
+            z = 6 * (index / (len(group) - 1) - 0.5)
+            weight = math.exp(-0.5 * z * z)
+            return -math.log1p(-rng.random()) / weight
+
+        selected.update(group[index] for index in
+                        heapq.nsmallest(quota, range(len(group)), key=draw_key))
+    return [record for record in records if record in selected]
 
 
 class ImageDataset(Dataset):
@@ -84,9 +132,13 @@ class ImageDataModule(pl.LightningDataModule):
                                           train_transform, root_dir)
         self.eval_dataset = ImageDataset(self.eval_records, self.class_to_idx,
                                          eval_transform, root_dir)
+        export_records = {
+            "train": select_export_records(self.train_records, cfg.sae_smples, cfg.seed),
+            "test": select_export_records(self.eval_records, cfg.sae_smples, cfg.seed),
+        }
         self.export_datasets = {
-            "train": ImageDataset(self.train_records, self.class_to_idx, eval_transform, root_dir),
-            "test": ImageDataset(self.eval_records, self.class_to_idx, eval_transform, root_dir),
+            split: ImageDataset(selected, self.class_to_idx, eval_transform, root_dir)
+            for split, selected in export_records.items()
         }
         self._ready = True
 
