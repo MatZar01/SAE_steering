@@ -73,3 +73,15 @@ def load_sae(run_dir: str | Path, device: str | torch.device = "cpu"):
     model = build_sae(**artifact["architecture"])
     model.load_state_dict(artifact["state_dict"], strict=True)
     return model.to(device).eval(), artifact
+
+
+def resolve_sae_run(log_dir: str | Path) -> Path:
+    """Accept an exact SAE run, an SAE directory, or its source image experiment."""
+    path = Path(log_dir).resolve()
+    if (path / "model.pt").is_file():
+        return path
+    base = path / "SAE" if (path / "SAE").is_dir() else path
+    runs = sorted(p.parent for p in base.glob("*/model.pt"))
+    if not runs:
+        raise FileNotFoundError(f"No completed SAE run found in {path}.")
+    return runs[-1]

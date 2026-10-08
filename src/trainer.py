@@ -69,7 +69,8 @@ class Classifier(pl.LightningModule):
                   flush=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.config.learning_rate,
+        optimizer = torch.optim.AdamW((p for p in self.parameters() if p.requires_grad),
+                                      lr=self.config.learning_rate,
                                       weight_decay=self.config.weight_decay)
         return {"optimizer": optimizer,
                 "lr_scheduler": build_scheduler(optimizer, self.config.scheduler)}

@@ -125,8 +125,8 @@ class ImageDataModule(pl.LightningDataModule):
         unknown = {r.label for r in self.eval_records} - self.class_to_idx.keys()
         if unknown:
             raise ValueError(f"Unknown test classes: {sorted(unknown)}")
-        train_transform = build_transforms(cfg.augments, training=True)
-        eval_transform = build_transforms(cfg.augments)
+        train_transform = build_transforms(cfg.augments, training=True, model_name=cfg.model_name)
+        eval_transform = build_transforms(cfg.augments, model_name=cfg.model_name)
         root_dir = cfg.root_dir.resolve()
         self.train_dataset = ImageDataset(self.train_records, self.class_to_idx,
                                           train_transform, root_dir)

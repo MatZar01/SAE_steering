@@ -11,22 +11,10 @@ from torch.utils.data import DataLoader, Dataset
 from cfgs.cfg import AugmentConfig
 from src.augments import build_transforms
 from src.models import build_model
-from src.models_sae import load_sae
+from src.models_sae import load_sae, resolve_sae_run
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
-
-
-def resolve_sae_run(log_dir: str | Path) -> Path:
-    """Accept an exact SAE run, an SAE directory, or its source image experiment."""
-    path = Path(log_dir).resolve()
-    if (path / "model.pt").is_file():
-        return path
-    base = path / "SAE" if (path / "SAE").is_dir() else path
-    runs = sorted(p.parent for p in base.glob("*/model.pt"))
-    if not runs:
-        raise FileNotFoundError(f"No completed SAE run found in {path}.")
-    return runs[-1]
 
 
 class InferenceImages(Dataset):
@@ -75,7 +63,8 @@ def iter_hidden_embeddings(log_dir, images_dir, batch_size=64, device="auto",
     if encoder.embedding_dim != artifact["architecture"]["input_dim"]:
         raise ValueError("Image encoder output dimension does not match the SAE input dimension.")
     encoder.to(device).eval()
-    transform = build_transforms(AugmentConfig(**source_config["augments"]))
+    transform = build_transforms(AugmentConfig(**source_config["augments"]),
+                                 model_name=source_config["model_name"])
     dataset = InferenceImages(Path(images_dir).resolve(), transform)
     for images, paths in DataLoader(dataset, batch_size=batch_size, shuffle=False):
         features = encoder.forward_features(images.to(device))

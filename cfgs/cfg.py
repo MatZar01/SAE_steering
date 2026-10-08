@@ -37,7 +37,7 @@ class ExperimentConfig:
     root_dir: Path = ROOT_DIR
     dataset_path: str = "DS/cifar10"
     log_dir: str = "log_dir"
-    model_name: str = "resnet18"
+    model_name: str = "resnet18"  # resnet18, blip, dino
     pretrained: bool = True
     epochs: int = 30
     batch_size: int = 64

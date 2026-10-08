@@ -1,4 +1,4 @@
-"""Configuration for training an SAE on an image experiment's embeddings."""
+"""Configuration for SAE training and neighborhood steering evaluation."""
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -57,3 +57,52 @@ class SAEConfig:
 
 
 CONFIG = SAEConfig()
+
+
+@dataclass
+class SteeringConfig:
+    """Point 1 settings for a saved SAE and its source image experiment."""
+
+    root_dir: Path = ROOT_DIR
+    # Exact SAE run, its SAE directory, or the source image experiment.
+    sae_log_dir: str = ""
+    # Optional override when the source image experiment has been moved.
+    model_log_dir: str = ""
+    max_anchors: int | None = 128  # None evaluates every latent with nonempty support.
+    max_neighborhood_size: int = 8  # Every size from 1 through this value is evaluated.
+    tversky_penalty: float = 0.5  # Equal penalty for each one-sided support difference.
+    classifier_epochs: int = 100
+    classifier_batch_size: int = 1024
+    classifier_learning_rate: float = 1e-3
+    classifier_weight_decay: float = 1e-4
+    evaluation_batch_size: int = 512
+    seed: int = 42
+    device: str = "auto"
+
+    def resolve(self, path: str) -> Path:
+        return (self.root_dir / path).resolve()
+
+    def validate(self) -> None:
+        if not self.sae_log_dir:
+            raise ValueError("Set sae_log_dir in cfgs/cfg_sae.py or pass --sae-log-dir.")
+        if self.max_anchors is not None and self.max_anchors < 1:
+            raise ValueError("max_anchors must be positive or None.")
+        if self.max_neighborhood_size < 1 or self.evaluation_batch_size < 1:
+            raise ValueError("Neighborhood size and evaluation batch size must be positive.")
+        if not 0 < self.tversky_penalty <= 1:
+            raise ValueError("tversky_penalty must be in (0, 1].")
+        if self.classifier_epochs < 1 or self.classifier_batch_size < 1:
+            raise ValueError("Classifier epochs and batch size must be positive.")
+        if self.classifier_learning_rate <= 0 or self.classifier_weight_decay < 0:
+            raise ValueError("Invalid classifier learning rate or weight decay.")
+
+    def to_dict(self) -> dict:
+        result = asdict(self)
+        result["root_dir"] = str(self.root_dir.resolve())
+        result["sae_log_dir"] = str(self.resolve(self.sae_log_dir))
+        if self.model_log_dir:
+            result["model_log_dir"] = str(self.resolve(self.model_log_dir))
+        return result
+
+
+STEERING_CONFIG = SteeringConfig()

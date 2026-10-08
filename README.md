@@ -9,19 +9,73 @@ conda activate saes
 python main.py
 # Optional overrides:
 python main.py --epochs 50 --batch-size 32 --learning-rate 0.0003
+python main.py --model-name blip --batch-size 16
+python main.py --model-name dino --batch-size 32
 ```
+
+To run image training, SAE training, and neighborhood steering in one sequence,
+edit the three dictionaries in `run_pipeline.py` and run:
+
+```bash
+python run_pipeline.py
+```
+
+For example, the override dictionary can contain:
+
+```python
+PIPELINE_OVERRIDES = {
+    "image": {"model_name": "dino", "epochs": 20,
+              "augments": {"image_size": 224}, "scheduler": {"patience": 2}},
+    "sae": {"model_name": "topk", "nb_concepts": 2048,
+            "top_k": 32, "epochs": 30},
+    "steering": {"max_anchors": 128, "max_neighborhood_size": 16},
+}
+```
+
+Every key corresponds to a field in `cfgs/cfg.py` or `cfgs/cfg_sae.py`;
+unspecified fields keep their defaults. The image stage chooses the base model.
+The SAE stage's `model_name` chooses its autoencoder variant. The pipeline passes
+the exact image run to SAE training and both run paths to steering, so leave
+`sae.model_log_dir`, `steering.sae_log_dir`, and `steering.model_log_dir` out of
+the overrides. Results remain nested under the chosen image `log_dir`.
 
 Edit `cfgs/cfg.py` for dataset paths, model name, optimizer, plateau scheduler,
 augmentations, workers, precision, and other experiment parameters. Relative paths
 are resolved from the project root, independent of the working directory.
-`src/models.py` has a model registry; add a constructor exposing `forward_features`
-and `embedding_dim` to make another model selectable by its string name.
+`src/models.py` has a model registry; each constructor exposes `forward_features`
+and `embedding_dim` so its features can be exported for SAE training. The image
+model is selected in `cfgs/cfg.py` or with `--model-name` in `main.py`. The linked
+`cfgs/cfg_sae.py` controls the separate SAE stage and its `model_name` chooses
+`basic`, `topk`, or `batch_topk`.
 
 The default model is ImageNet-pretrained ResNet-18, fine-tuned end to end with
-AdamW. Its weights are downloaded by torchvision on first use. `--no-pretrained`
-supports offline smoke runs. Training uses random crops, horizontal flips,
-rotation, color jitter, Gaussian blur, and random masking. Evaluation and export
-use deterministic resize/center crop and ImageNet normalization.
+AdamW. The other image models are fixed encoders with a new linear classifier;
+only that classifier is optimized. The number of outputs is taken from the
+training class folders. Their pretrained weights are downloaded on first use;
+`--no-pretrained` skips the download for offline smoke runs and gives a randomly
+initialized, frozen encoder.
+
+| Model name | Checkpoint | Frozen features | Suggested input size |
+| --- | --- | --- | --- |
+| `resnet18` | torchvision ImageNet-1k weights | No; the encoder is fine-tuned | 224 |
+| `blip` | [Salesforce/blip-image-captioning-base](https://huggingface.co/Salesforce/blip-image-captioning-base) | 768-dimensional vision CLS embedding | 384 |
+| `dino` | [facebook/dino-vitb16](https://huggingface.co/facebook/dino-vitb16) | 768-dimensional vision CLS embedding | 224 |
+
+BLIP's caption decoder is discarded after loading, and DINO's pretrained
+representation has no task classifier. Each gets a new classifier sized to the
+dataset; exported embeddings are taken before it. [BLIP's vision encoder](https://proceedings.mlr.press/v162/li22n/li22n.pdf) was
+initialized from an ImageNet-pretrained ViT and then trained for vision-language
+tasks. The selected DINO checkpoint was self-supervised on ImageNet-1k. The newer
+[DINOv2](https://huggingface.co/facebook/dinov2-base) and
+[DINOv3](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m)
+encoders use other pretraining datasets, so `dino` selects the
+ImageNet-trained checkpoint. Set `augments.image_size = 384` in `cfgs/cfg.py`
+for BLIP's native resolution; smaller sizes use positional embedding interpolation.
+BLIP uses the checkpoint's normalization, while ResNet and DINO use ImageNet
+normalization. Training uses random crops, horizontal flips, rotation, color
+jitter, Gaussian blur, and random masking. Evaluation and export use a square
+resize for BLIP and DINO, or resize/center crop for ResNet, followed by the
+selected model's normalization.
 
 ## Dataset and evaluation
 
@@ -73,10 +127,10 @@ hparams.yaml
 metrics.csv            # train/evaluation metrics and learning rate
 checkpoints/           # best evaluation-loss checkpoint and last.ckpt
 out/
-  embeddings_train.pt  # float32 tensor [N_train, 512] for ResNet-18
+  embeddings_train.pt  # float32 tensor [N_train, embedding_dim]
   labels_train.pt      # int64 tensor [N_train]
   image_paths_train.csv
-  embeddings_test.pt   # float32 tensor [N_test, 512] for ResNet-18
+  embeddings_test.pt   # float32 tensor [N_test, embedding_dim]
   labels_test.pt       # int64 tensor [N_test]
   image_paths_test.csv
 ```
@@ -178,5 +232,52 @@ a particular model. The script loads the original image model's
 with its path and full SAE hidden code (after ReLU/sparsification). It does not
 download ImageNet weights. Keep the source image checkpoint/config with the SAE;
 `--model-log-dir` can override their location after moving files.
+
+## Neighborhood-based SAE steering evaluation
+
+`main_steering.py` implements point 1 of `SAE_tversky_group_steering.pdf` using
+the saved image embeddings, labels, and SAE checkpoint. Set `sae_log_dir` in
+`cfgs/cfg_sae.py` or pass an exact SAE run, its `SAE` directory, or the source
+image run:
+
+```bash
+python main_steering.py --sae-log-dir log_dir/YYMMDD-hh_mm_ss/SAE/YYMMDD-hh_mm_ss
+# Evaluate every eligible anchor and neighborhood sizes 1 through 16:
+python main_steering.py --sae-log-dir log_dir/YYMMDD-hh_mm_ss/SAE/YYMMDD-hh_mm_ss \
+  --all-anchors --max-neighborhood-size 16
+```
+
+The runner fits one linear classifier to the exported original training
+representations and then freezes it. For each SAE latent, training support is
+`z_k(x) > mean_train(z_k)`. Latents with no positive training activation or
+empty support are excluded. Neighbors are ranked by symmetric Tversky overlap
+of support sets, `|A∩B| / (|A∩B| + p(|A∖B| + |B∖A|))`, with `p=0.5` by default;
+equal scores use latent index order. The default samples up to 128 eligible
+anchors with seed 42 and evaluates every neighborhood size from 1 through 8.
+
+Ablation zeros the neighborhood's codes, decodes the result, and passes it to
+the fixed classifier. Accuracy drops are measured against the unmodified SAE
+reconstruction on the exported test set; accuracy on original test embeddings
+is saved as a reference. The class with the largest drop at size 1 is fixed as
+that anchor's target at every larger size. Non-target damage is the unweighted
+mean accuracy drop across the other observed classes. The support of a
+neighborhood is the union of its latent supports. Its variance metrics use the
+original training embeddings in that union, with population variance (`N` in
+the denominator). Total variance and mean squared distance to the centroid
+are equal by definition.
+
+Results are written to `SAE/<sae-run>/steering/<timestamp>/`:
+
+```text
+neighborhoods.csv   # each anchor and size: latents, target, drops, support, variance
+summary.csv         # means over all anchors and over anchors with nonzero size-1 target drop
+metadata.json       # settings, source runs, class mapping, baseline accuracies
+classifier.pt       # fixed linear classifier weights
+latent_statistics.pt # sampled anchor similarity columns, means and support counts
+```
+
+If the source image run has moved, pass `--model-log-dir` to its new path. The
+evaluation uses the saved exported splits; if `sae_smples` sampled them in the
+image run, the classifier and metrics use those sampled images.
 
 Run the integration checks with `python -m unittest discover -s tests -v`.
