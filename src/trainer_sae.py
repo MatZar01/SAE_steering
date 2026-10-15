@@ -22,7 +22,7 @@ class SAETrainer(pl.LightningModule):
         super().__init__()
         self.config = config
         self.architecture = dict(name=config.model_name, input_dim=input_dim,
-                                 nb_concepts=config.nb_concepts, top_k=config.top_k,
+                                 nb_concepts=config.concept_count(input_dim), top_k=config.top_k,
                                  threshold_momentum=config.threshold_momentum)
         self.model = build_sae(**self.architecture)
         self.save_hyperparameters({"config": config.to_dict(), "architecture": self.architecture})
@@ -111,7 +111,9 @@ def run_sae_experiment(config: SAEConfig) -> Path:
     logger = CSVLogger(str(run_dir), name="", version="")
     _ = logger.experiment
     metadata = config.to_dict()
-    metadata.update(input_dim=embeddings.shape[1], num_embeddings=len(embeddings),
+    metadata.update(input_dim=embeddings.shape[1],
+                    nb_concepts=module.architecture["nb_concepts"],
+                    num_embeddings=len(embeddings),
                     num_train=len(split["train"]), num_validation=len(split["val"]),
                     overcomplete_version=version("overcomplete"),
                     torch_version=str(torch.__version__), lightning_version=pl.__version__)

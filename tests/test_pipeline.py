@@ -41,6 +41,10 @@ class PipelineTest(unittest.TestCase):
     def test_class_folders_and_test_evaluation(self):
         data = ImageDataModule(self.config)
         data.setup()
+        self.config.batch_size = 12
+        self.config.export_batch_size = 2
+        self.assertEqual(len(next(iter(data.train_dataloader()))[1]), 12)
+        self.assertEqual(len(next(iter(data.export_dataloader("train")))[1]), 2)
         self.assertEqual(len(data.train_records), 12)
         self.assertEqual(len(data.eval_records), 2)
         self.assertFalse(set(data.train_records) & set(data.eval_records))
@@ -115,9 +119,11 @@ class PipelineTest(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             run = run_experiment(self.config)
         lines = output.getvalue().strip().splitlines()
-        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(len([line for line in lines if line.startswith("Epoch ")]), 1, lines)
         self.assertTrue(lines[0].startswith("Epoch 005 | train loss="))
         self.assertIn("test loss=", lines[0])
+        self.assertIn("Exporting train embeddings: 12/12", lines)
+        self.assertIn("Exporting test embeddings: 2/2", lines)
         self.assertRegex(run.name, r"^\d{6}-\d{2}_\d{2}_\d{2}$")
         self.assertEqual({path.name for path in (run / "out").iterdir()},
                          {f"{kind}_{split}.{extension}"

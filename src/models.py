@@ -3,12 +3,12 @@
 import torch
 from torch import nn
 from torchvision.models import ResNet18_Weights, resnet18
-from transformers import (BlipForConditionalGeneration, BlipVisionConfig,
-                          BlipVisionModel, ViTConfig, ViTModel)
+from transformers import (Blip2VisionConfig, Blip2VisionModel,
+                          DINOv3ViTConfig, DINOv3ViTModel)
 
 
-BLIP_CHECKPOINT = "Salesforce/blip-image-captioning-base"
-DINO_CHECKPOINT = "facebook/dino-vitb16"
+BLIP_CHECKPOINT = "Salesforce/blip2-opt-2.7b"
+DINO_CHECKPOINT = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 
 
 class ResNet18(nn.Module):
@@ -50,10 +50,15 @@ class FrozenVisionClassifier(nn.Module):
 class Blip(FrozenVisionClassifier):
     def __init__(self, num_classes: int, pretrained: bool = True):
         if pretrained:
-            # Retain only the image encoder; the caption decoder is unnecessary.
-            backbone = BlipForConditionalGeneration.from_pretrained(BLIP_CHECKPOINT).vision_model
+            # Load the vision weights from the full BLIP-2 checkpoint without
+            # instantiating its Q-Former or language model.
+            vision_config = Blip2VisionConfig.from_pretrained(BLIP_CHECKPOINT)
+            backbone = Blip2VisionModel.from_pretrained(
+                BLIP_CHECKPOINT, config=vision_config,
+                key_mapping={r"^vision_model\.": ""},
+            )
         else:
-            backbone = BlipVisionModel(BlipVisionConfig())
+            backbone = Blip2VisionModel(Blip2VisionConfig())
         super().__init__(backbone, backbone.config.hidden_size, num_classes)
 
     def forward_features(self, images: torch.Tensor) -> torch.Tensor:
@@ -65,15 +70,17 @@ class Blip(FrozenVisionClassifier):
 class Dino(FrozenVisionClassifier):
     def __init__(self, num_classes: int, pretrained: bool = True):
         if pretrained:
-            backbone = ViTModel.from_pretrained(DINO_CHECKPOINT, add_pooling_layer=False)
+            backbone = DINOv3ViTModel.from_pretrained(DINO_CHECKPOINT)
         else:
-            backbone = ViTModel(ViTConfig(), add_pooling_layer=False)
+            backbone = DINOv3ViTModel(DINOv3ViTConfig(
+                hidden_size=768, intermediate_size=3072, num_hidden_layers=12,
+                num_attention_heads=12, num_register_tokens=4,
+            ))
         super().__init__(backbone, backbone.config.hidden_size, num_classes)
 
     def forward_features(self, images: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            return self.backbone(pixel_values=images,
-                                 interpolate_pos_encoding=True).last_hidden_state[:, 0]
+            return self.backbone(pixel_values=images).pooler_output
 
 
 MODEL_REGISTRY = {"resnet18": ResNet18, "blip": Blip, "dino": Dino}

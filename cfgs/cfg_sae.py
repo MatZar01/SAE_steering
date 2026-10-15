@@ -12,7 +12,7 @@ class SAEConfig:
     # Set this to the image experiment containing out/embeddings_train.pt.
     model_log_dir: str = ""
     model_name: str = "basic"  # basic, topk, batch_topk
-    nb_concepts: int = 2048
+    concept_expansion_factor: int = 4
     top_k: int = 32  # Per sample; batch_topk uses batch_size * top_k globally.
     l1_coefficient: float = 1e-3  # Applied only to basic SAE.
     threshold_momentum: float = 0.9
@@ -40,12 +40,25 @@ class SAEConfig:
         result["model_log_dir"] = str(self.source_dir())
         return result
 
+    def concept_count(self, input_dim: int) -> int:
+        """Resolve the SAE width from the exported feature dimension."""
+        if type(input_dim) is not int or input_dim < 1:
+            raise ValueError("input_dim must be a positive integer.")
+        if type(self.concept_expansion_factor) is not int or self.concept_expansion_factor < 1:
+            raise ValueError("concept_expansion_factor must be a positive integer.")
+        nb_concepts = self.concept_expansion_factor * input_dim
+        if self.model_name != "basic" and self.top_k > nb_concepts:
+            raise ValueError("top_k must not exceed concept_expansion_factor * input_dim.")
+        return nb_concepts
+
     def validate(self):
         self.source_dir()
         if self.model_name not in {"basic", "topk", "batch_topk"}:
             raise ValueError("model_name must be basic, topk, or batch_topk.")
-        if self.nb_concepts < 1 or (self.model_name != "basic" and not 1 <= self.top_k <= self.nb_concepts):
-            raise ValueError("Require nb_concepts >= 1 and 1 <= top_k <= nb_concepts.")
+        if type(self.concept_expansion_factor) is not int or self.concept_expansion_factor < 1:
+            raise ValueError("concept_expansion_factor must be a positive integer.")
+        if self.model_name != "basic" and (type(self.top_k) is not int or self.top_k < 1):
+            raise ValueError("top_k must be a positive integer.")
         if self.epochs < 1 or self.batch_size < 1 or self.num_workers < 0:
             raise ValueError("Require positive epochs/batch_size and nonnegative num_workers.")
         if not 0 < self.validation_fraction < 1:
@@ -106,3 +119,30 @@ class SteeringConfig:
 
 
 STEERING_CONFIG = SteeringConfig()
+
+
+@dataclass
+class SAEInferenceConfig:
+    """Rank source images by SAE latent and discovered-group activation."""
+
+    root_dir: Path = ROOT_DIR
+    sae_log_dir: str = ""
+    steering_log_dir: str = ""  # Exact steering run; latest run is used when empty.
+    model_log_dir: str = ""  # Optional override for a moved image experiment.
+    top_active_images: int = 3  # Grid side length; 3 selects up to 9 images.
+    batch_size: int = 512
+    device: str = "auto"
+
+    def resolve(self, path: str) -> Path:
+        return (self.root_dir / path).resolve()
+
+    def validate(self) -> None:
+        if not self.sae_log_dir:
+            raise ValueError("Set sae_log_dir in cfgs/cfg_sae.py or pass --sae-log-dir.")
+        if type(self.top_active_images) is not int or self.top_active_images < 1:
+            raise ValueError("top_active_images must be a positive integer.")
+        if type(self.batch_size) is not int or self.batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+
+
+INFERENCE_CONFIG = SAEInferenceConfig()

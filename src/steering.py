@@ -18,13 +18,15 @@ RESULT_FIELDS = (
     "anchor", "size", "latents", "target_class", "target_class_index",
     "target_accuracy_drop", "non_target_mean_accuracy_drop", "overall_accuracy_drop",
     "support_size", "mean_per_dimension_variance", "total_variance",
-    "mean_squared_distance_to_centroid", "class_accuracy_drops",
+    "mean_squared_distance_to_centroid", "active_state_variance",
+    "active_state_cosine_similarity", "class_accuracy_drops",
 )
 SUMMARY_FIELDS = (
     "population", "size", "anchors", "mean_target_accuracy_drop",
     "mean_non_target_accuracy_drop", "mean_overall_accuracy_drop",
     "mean_support_size", "mean_per_dimension_variance", "mean_total_variance",
-    "mean_squared_distance_to_centroid", "target_drop_change_from_size_1",
+    "mean_squared_distance_to_centroid", "mean_active_state_variance",
+    "mean_active_state_cosine_similarity", "target_drop_change_from_size_1",
     "non_target_drop_change_from_size_1", "total_variance_change_from_size_1",
 )
 
@@ -189,6 +191,38 @@ def _neighborhood_variance(embeddings: torch.Tensor, support: torch.Tensor,
                per_dimension_variance.sum().item())
 
 
+@torch.inference_mode()
+def _selected_training_codes(sae: nn.Module, embeddings: torch.Tensor,
+                             latents: list[int], batch_size: int,
+                             device: torch.device) -> torch.Tensor:
+    """Cache only codes used by evaluated neighborhoods."""
+    selected = torch.empty((len(embeddings), len(latents)), dtype=torch.float32)
+    columns = torch.tensor(latents, dtype=torch.long, device=device)
+    for start in range(0, len(embeddings), batch_size):
+        end = min(start + batch_size, len(embeddings))
+        codes = sae.encode(embeddings[start:end].to(device))[1]
+        selected[start:end] = codes[:, columns].cpu()
+    return selected
+
+
+def _active_state_metrics(codes: torch.Tensor, support: torch.Tensor,
+                          neighborhood: list[int], columns: dict[int, int]):
+    """Population code variance and mean pairwise cosine on group support."""
+    active = support[:, neighborhood].any(dim=1)
+    states = codes[active][:, [columns[latent] for latent in neighborhood]].double()
+    variance = states.var(dim=0, unbiased=False).mean().item()
+    lengths = torch.linalg.vector_norm(states, dim=1)
+    nonzero = lengths > 0
+    unit = states[nonzero] / lengths[nonzero, None]
+    if len(unit) < 2:
+        cosine = None
+    else:
+        # Sum of all off-diagonal dot products, without an N-by-N matrix.
+        cosine = ((unit.sum(dim=0).square().sum() - len(unit))
+                  / (len(unit) * (len(unit) - 1))).clamp(-1, 1).item()
+    return variance, cosine
+
+
 def _summaries(rows: list[dict], max_size: int) -> list[dict]:
     at_one = {row["anchor"]: row for row in rows if row["size"] == 1}
     nonzero = {anchor for anchor, row in at_one.items()
@@ -206,9 +240,12 @@ def _summaries(rows: list[dict], max_size: int) -> list[dict]:
                 ("mean_per_dimension_variance", "mean_per_dimension_variance"),
                 ("mean_total_variance", "total_variance"),
                 ("mean_squared_distance_to_centroid", "mean_squared_distance_to_centroid"),
+                ("mean_active_state_variance", "active_state_variance"),
+                ("mean_active_state_cosine_similarity", "active_state_cosine_similarity"),
             )
             for output_name, row_name in metrics:
-                summary[output_name] = statistics.fmean(row[row_name] for row in group) if group else None
+                values = [row[row_name] for row in group if row[row_name] is not None]
+                summary[output_name] = statistics.fmean(values) if values else None
             for output_name, row_name in (
                 ("target_drop_change_from_size_1", "target_accuracy_drop"),
                 ("non_target_drop_change_from_size_1", "non_target_mean_accuracy_drop"),
@@ -276,6 +313,18 @@ def run_steering(config: SteeringConfig) -> Path:
     max_size = min(config.max_neighborhood_size, len(eligible))
     similarity = _similarity_to_anchors(support, anchors, config.tversky_penalty,
                                         config.evaluation_batch_size, device)
+    neighborhoods = []
+    for column, anchor_tensor in enumerate(anchors):
+        anchor = int(anchor_tensor)
+        scores = similarity[:, column].clone()
+        scores[support_counts == 0] = -float("inf")
+        scores[anchor] = -float("inf")
+        ranked = torch.argsort(scores, descending=True, stable=True)
+        neighborhoods.append([anchor] + ranked[:max_size - 1].tolist())
+    selected_latents = sorted({latent for group in neighborhoods for latent in group})
+    code_columns = {latent: column for column, latent in enumerate(selected_latents)}
+    train_codes = _selected_training_codes(
+        sae, train_embeddings, selected_latents, config.evaluation_batch_size, device)
     test_codes, reconstructions, baseline_correct = _test_codes_and_baseline(
         sae, classifier, test_embeddings, test_labels,
         config.evaluation_batch_size, num_classes, device)
@@ -284,13 +333,8 @@ def run_steering(config: SteeringConfig) -> Path:
     baseline_overall = baseline_correct.sum().item() / len(test_labels)
 
     rows = []
-    for column, anchor_tensor in enumerate(anchors):
-        anchor = int(anchor_tensor)
-        scores = similarity[:, column].clone()
-        scores[support_counts == 0] = -float("inf")
-        scores[anchor] = -float("inf")
-        ranked = torch.argsort(scores, descending=True, stable=True)
-        neighborhood = [anchor] + ranked[:max_size - 1].tolist()
+    for column, neighborhood in enumerate(neighborhoods):
+        anchor = neighborhood[0]
         correct_by_size = _ablated_correct_by_size(
             classifier, test_codes, reconstructions, dictionary, test_labels,
             neighborhood, config.evaluation_batch_size, num_classes, device)
@@ -300,6 +344,8 @@ def run_steering(config: SteeringConfig) -> Path:
                 _neighborhood_variance(train_embeddings, support, neighborhood)), start=1):
             drops = baseline_accuracy - correct.double() / test_counts.clamp_min(1)
             support_size, mean_variance, total_variance = variance
+            active_variance, active_cosine = _active_state_metrics(
+                train_codes, support, neighborhood[:size], code_columns)
             rows.append({
                 "anchor": anchor, "size": size,
                 "latents": "|".join(map(str, neighborhood[:size])),
@@ -313,6 +359,8 @@ def run_steering(config: SteeringConfig) -> Path:
                 "total_variance": total_variance,
                 # Population variance identity: E||h - mean(h)||^2 = sum_d Var(h_d).
                 "mean_squared_distance_to_centroid": total_variance,
+                "active_state_variance": active_variance,
+                "active_state_cosine_similarity": active_cosine,
                 "class_accuracy_drops": json.dumps({class_names[idx]: drops[idx].item()
                                                      for idx in observed_classes}),
             })
@@ -338,6 +386,12 @@ def run_steering(config: SteeringConfig) -> Path:
         "max_evaluated_size": max_size,
         "similarity": "|A∩B| / (|A∩B| + penalty*(|A\\B| + |B\\A|))",
         "support": "z_k(x) > mean_train(z_k)",
+        "active_state_metrics": (
+            "On training images in the union of group supports, use the group's SAE code vector "
+            "(including zero entries). Variance is the mean population variance across group "
+            "dimensions. Cosine similarity is the mean over distinct image pairs with nonzero "
+            "code norm; null when fewer than two such images exist."
+        ),
         "accuracy_drop_baseline": "unmodified SAE reconstruction on exported test embeddings",
         "nonzero_size_1_anchors": sum(abs(row["target_accuracy_drop"]) > 1e-12
                                       for row in rows if row["size"] == 1),

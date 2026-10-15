@@ -132,6 +132,11 @@ class ImageDataModule(pl.LightningDataModule):
                                           train_transform, root_dir)
         self.eval_dataset = ImageDataset(self.eval_records, self.class_to_idx,
                                          eval_transform, root_dir)
+        self.feature_datasets = {
+            "train": ImageDataset(self.train_records, self.class_to_idx,
+                                  eval_transform, root_dir),
+            "test": self.eval_dataset,
+        }
         export_records = {
             "train": select_export_records(self.train_records, cfg.sae_smples, cfg.seed),
             "test": select_export_records(self.eval_records, cfg.sae_smples, cfg.seed),
@@ -142,14 +147,15 @@ class ImageDataModule(pl.LightningDataModule):
         }
         self._ready = True
 
-    def _loader(self, dataset, shuffle=False):
+    def _loader(self, dataset, shuffle=False, batch_size=None):
+        batch_size = self.config.batch_size if batch_size is None else batch_size
         return DataLoader(
-            dataset, batch_size=self.config.batch_size, shuffle=shuffle,
+            dataset, batch_size=batch_size, shuffle=shuffle,
             num_workers=self.config.num_workers, pin_memory=torch.cuda.is_available(),
             persistent_workers=self.config.num_workers > 0,
             generator=torch.Generator().manual_seed(self.config.seed),
             # BatchNorm needs >1 sample for 32x32 inputs in its final feature map.
-            drop_last=shuffle and len(dataset) % self.config.batch_size == 1,
+            drop_last=shuffle and len(dataset) % batch_size == 1,
         )
 
     def train_dataloader(self):
@@ -159,4 +165,9 @@ class ImageDataModule(pl.LightningDataModule):
         return self._loader(self.eval_dataset)
 
     def export_dataloader(self, split: str):
-        return self._loader(self.export_datasets[split])
+        return self._loader(self.export_datasets[split],
+                            batch_size=self.config.export_batch_size)
+
+    def feature_dataloader(self, split: str):
+        return self._loader(self.feature_datasets[split],
+                            batch_size=self.config.export_batch_size)

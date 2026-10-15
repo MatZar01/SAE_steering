@@ -41,6 +41,7 @@ class ExperimentConfig:
     pretrained: bool = True
     epochs: int = 30
     batch_size: int = 64
+    export_batch_size: int = 4
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     num_workers: int = 4
@@ -64,8 +65,8 @@ class ExperimentConfig:
         return result
 
     def validate(self) -> None:
-        if self.epochs < 1 or self.batch_size < 2 or self.num_workers < 0:
-            raise ValueError("epochs >= 1, batch_size >= 2 and num_workers >= 0 are required.")
+        if self.epochs < 1 or self.batch_size < 2 or self.export_batch_size < 1 or self.num_workers < 0:
+            raise ValueError("epochs >= 1, batch_size >= 2, export_batch_size >= 1 and num_workers >= 0 are required.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise ValueError("learning_rate must be positive and weight_decay nonnegative.")
         if self.print_every_n_epochs < 1 or self.augments.image_size < 32:

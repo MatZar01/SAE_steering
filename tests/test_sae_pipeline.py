@@ -53,13 +53,27 @@ class SAEPipelineTest(unittest.TestCase):
                 separate = torch.cat([restored.encode(row[None])[1] for row in x])
                 torch.testing.assert_close(together, separate)
 
+    def test_concept_expansion_uses_feature_width(self):
+        cfg = SAEConfig(model_log_dir=str(self.root), concept_expansion_factor=2,
+                        model_name="topk", top_k=3)
+        self.assertEqual(cfg.concept_count(512), 1024)
+        self.assertEqual(cfg.concept_count(8), 16)
+        for factor in (0, -1, 2.5, True, "2"):
+            with self.subTest(factor=factor), self.assertRaisesRegex(
+                    ValueError, "concept_expansion_factor"):
+                SAEConfig(model_log_dir=str(self.root),
+                          concept_expansion_factor=factor).validate()
+        cfg.top_k = 17
+        with self.assertRaisesRegex(ValueError, "top_k"):
+            cfg.concept_count(8)
+
     def test_all_variants_train_save_load(self):
         torch.save(torch.randn(13, 8), self.root / "out/embeddings_train.pt")
         torch.save(torch.randn(3, 7), self.root / "out/embeddings_test.pt")
         for name in ("basic", "topk", "batch_topk"):
             with self.subTest(name=name):
                 cfg = SAEConfig(model_log_dir=str(self.root), model_name=name,
-                                nb_concepts=16, top_k=3, epochs=5, batch_size=5,
+                                concept_expansion_factor=2, top_k=3, epochs=5, batch_size=5,
                                 accelerator="cpu")
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
@@ -69,6 +83,11 @@ class SAEPipelineTest(unittest.TestCase):
                 self.assertEqual(run.parent, self.root / "SAE")
                 loaded, artifact = load_sae(run)
                 self.assertEqual(artifact["architecture"]["name"], name)
+                self.assertEqual(artifact["architecture"]["input_dim"], 8)
+                self.assertEqual(artifact["architecture"]["nb_concepts"], 16)
+                metadata = json.loads((run / "config.json").read_text())
+                self.assertEqual(metadata["concept_expansion_factor"], 2)
+                self.assertEqual(metadata["nb_concepts"], 16)
                 self.assertTrue((run / "metrics.csv").is_file())
                 split = torch.load(run / "split_indices.pt", weights_only=True)
                 self.assertEqual(sorted(torch.cat(list(split.values())).tolist()), list(range(13)))
@@ -92,9 +111,10 @@ class SAEPipelineTest(unittest.TestCase):
         image.save(images_dir / "sample.png")
         torch.save(torch.randn(5, 512), self.root / "out/embeddings_train.pt")
         run = run_sae_experiment(SAEConfig(model_log_dir=str(self.root), model_name="batch_topk",
-                                           nb_concepts=16, top_k=3, epochs=1, batch_size=3,
+                                           concept_expansion_factor=2, top_k=3, epochs=1, batch_size=3,
                                            accelerator="cpu"))
         sae, _ = load_sae(run)
+        self.assertEqual(sae.nb_concepts, 1024)
         with torch.inference_mode():
             features = encoder.forward_features(build_transforms(cfg.augments)(image)[None])
             expected = sae.encode(features)[1][0]

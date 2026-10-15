@@ -12,6 +12,7 @@ def main():
     parser.add_argument("--dataset-path", help="Dataset path, relative to project root or absolute")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--export-batch-size", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--model-name")
     parser.add_argument("--num-workers", type=int)

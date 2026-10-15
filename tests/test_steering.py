@@ -7,11 +7,12 @@ import unittest
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from cfgs.cfg_sae import SteeringConfig
 from src.models_sae import build_sae, load_sae
-from src.steering import run_steering
+from src.steering import _active_state_metrics, run_steering
 
 
 class SteeringTest(unittest.TestCase):
@@ -51,6 +52,16 @@ class SteeringTest(unittest.TestCase):
                     "state_dict": sae.state_dict()}, self.sae_run / "model.pt")
         self.base_state = sae.state_dict()
 
+    def test_active_state_metrics_singleton_and_orthogonal_codes(self):
+        codes = torch.tensor([[2.0, 0.0], [0.0, 1.0]])
+        support = codes > 0
+        columns = {0: 0, 1: 1}
+        variance, cosine = _active_state_metrics(codes, support, [0], columns)
+        self.assertEqual((variance, cosine), (0.0, None))
+        variance, cosine = _active_state_metrics(codes, support, [0, 1], columns)
+        self.assertAlmostEqual(variance, 0.625)
+        self.assertAlmostEqual(cosine, 0.0)
+
     def test_nested_neighborhoods_fixed_targets_and_population_outputs(self):
         config = SteeringConfig(sae_log_dir=str(self.sae_run), max_anchors=None,
                                 max_neighborhood_size=3, classifier_epochs=80,
@@ -77,6 +88,23 @@ class SteeringTest(unittest.TestCase):
         self.assertEqual(stats["support_count"][0].item(), 4)
         self.assertEqual(stats["support_count"][1].item(), 4)
         sae, _ = load_sae(self.sae_run)
+        train = torch.load(self.source / "out/embeddings_train.pt", weights_only=True)
+        with torch.inference_mode():
+            train_codes = sae.encode(train)[1]
+        mean_code = train_codes.double().mean(dim=0)
+        for row in rows:
+            latents = [int(latent) for latent in row["latents"].split("|")]
+            active = (train_codes[:, latents] > mean_code[latents]).any(dim=1)
+            states = train_codes[active][:, latents].double()
+            expected_variance = states.var(dim=0, unbiased=False).mean().item()
+            self.assertAlmostEqual(float(row["active_state_variance"]), expected_variance)
+            if len(states) >= 2:
+                unit = F.normalize(states, dim=1)
+                pairwise = unit @ unit.T
+                expected_cosine = pairwise.triu(diagonal=1).sum().item() * 2 / (len(states) * (len(states) - 1))
+                self.assertAlmostEqual(float(row["active_state_cosine_similarity"]), expected_cosine)
+            else:
+                self.assertEqual(row["active_state_cosine_similarity"], "")
         head = nn.Linear(2, 2)
         head.load_state_dict(classifier["state_dict"])
         test = torch.load(self.source / "out/embeddings_test.pt", weights_only=True)
@@ -114,6 +142,11 @@ class SteeringTest(unittest.TestCase):
         for summary in summaries:
             if summary["population"] == "nonzero_size_1":
                 self.assertEqual(int(summary["anchors"]), metadata["nonzero_size_1_anchors"])
+            if summary["population"] == "all":
+                group = [row for row in rows if int(row["size"]) == int(summary["size"])]
+                expected = sum(float(row["active_state_variance"]) for row in group) / len(group)
+                self.assertAlmostEqual(float(summary["mean_active_state_variance"]), expected)
+        self.assertIn("SAE code vector", metadata["active_state_metrics"])
 
     def test_invalid_configuration_fails_before_loading(self):
         with self.assertRaisesRegex(ValueError, "tversky_penalty"):

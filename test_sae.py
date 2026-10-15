@@ -57,9 +57,16 @@ def iter_hidden_embeddings(log_dir, images_dir, batch_size=64, device="auto",
                             map_location="cpu", weights_only=True)
     encoder = build_model(source_config["model_name"],
                           checkpoint["hyper_parameters"]["num_classes"], pretrained=False)
-    state = {key.removeprefix("model."): value for key, value in checkpoint["state_dict"].items()
-             if key.startswith("model.")}
-    encoder.load_state_dict(state, strict=True)
+    if source_config.get("frozen_feature_training"):
+        frozen = torch.load(source / "frozen_encoder.pt",
+                            map_location="cpu", weights_only=True)
+        encoder.backbone.load_state_dict(frozen["state_dict"], strict=True)
+        if encoder.embedding_dim != frozen["embedding_dim"]:
+            raise ValueError("Saved frozen encoder dimension does not match its checkpoint.")
+    else:
+        state = {key.removeprefix("model."): value for key, value in checkpoint["state_dict"].items()
+                 if key.startswith("model.")}
+        encoder.load_state_dict(state, strict=True)
     if encoder.embedding_dim != artifact["architecture"]["input_dim"]:
         raise ValueError("Image encoder output dimension does not match the SAE input dimension.")
     encoder.to(device).eval()

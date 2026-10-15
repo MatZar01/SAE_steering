@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-log-dir")
     parser.add_argument("--model-name", choices=["basic", "topk", "batch_topk"])
-    parser.add_argument("--nb-concepts", type=int)
+    parser.add_argument("--concept-expansion-factor", type=int)
     parser.add_argument("--top-k", type=int)
     parser.add_argument("--l1-coefficient", type=float)
     parser.add_argument("--epochs", type=int)

@@ -11,10 +11,11 @@ python main.py
 python main.py --epochs 50 --batch-size 32 --learning-rate 0.0003
 python main.py --model-name blip --batch-size 16
 python main.py --model-name dino --batch-size 32
+python main.py --model-name blip --export-batch-size 2
 ```
 
-To run image training, SAE training, and neighborhood steering in one sequence,
-edit the three dictionaries in `run_pipeline.py` and run:
+To run image training, SAE training, neighborhood steering, and active-image
+inference in one sequence, edit the four dictionaries in `run_pipeline.py` and run:
 
 ```bash
 python run_pipeline.py
@@ -26,18 +27,20 @@ For example, the override dictionary can contain:
 PIPELINE_OVERRIDES = {
     "image": {"model_name": "dino", "epochs": 20,
               "augments": {"image_size": 224}, "scheduler": {"patience": 2}},
-    "sae": {"model_name": "topk", "nb_concepts": 2048,
+    "sae": {"model_name": "topk", "concept_expansion_factor": 4,
             "top_k": 32, "epochs": 30},
     "steering": {"max_anchors": 128, "max_neighborhood_size": 16},
+    "inference": {"top_active_images": 3},
 }
 ```
 
 Every key corresponds to a field in `cfgs/cfg.py` or `cfgs/cfg_sae.py`;
 unspecified fields keep their defaults. The image stage chooses the base model.
 The SAE stage's `model_name` chooses its autoencoder variant. The pipeline passes
-the exact image run to SAE training and both run paths to steering, so leave
-`sae.model_log_dir`, `steering.sae_log_dir`, and `steering.model_log_dir` out of
-the overrides. Results remain nested under the chosen image `log_dir`.
+the exact image run to SAE training, both run paths to steering, and the exact
+SAE and steering runs to inference. Their linked run paths are set automatically;
+leave them out of the overrides. Results remain nested under the chosen image
+`log_dir`.
 
 Edit `cfgs/cfg.py` for dataset paths, model name, optimizer, plateau scheduler,
 augmentations, workers, precision, and other experiment parameters. Relative paths
@@ -50,31 +53,31 @@ model is selected in `cfgs/cfg.py` or with `--model-name` in `main.py`. The link
 
 The default model is ImageNet-pretrained ResNet-18, fine-tuned end to end with
 AdamW. The other image models are fixed encoders with a new linear classifier;
-only that classifier is optimized. The number of outputs is taken from the
-training class folders. Their pretrained weights are downloaded on first use;
+their train and test features are extracted once, then only the classifier is
+optimized from the saved features. Extraction displays a progress bar for each
+split. The number of outputs is taken from the training class folders. Their
+pretrained weights are downloaded on first use;
 `--no-pretrained` skips the download for offline smoke runs and gives a randomly
 initialized, frozen encoder.
 
 | Model name | Checkpoint | Frozen features | Suggested input size |
 | --- | --- | --- | --- |
 | `resnet18` | torchvision ImageNet-1k weights | No; the encoder is fine-tuned | 224 |
-| `blip` | [Salesforce/blip-image-captioning-base](https://huggingface.co/Salesforce/blip-image-captioning-base) | 768-dimensional vision CLS embedding | 384 |
-| `dino` | [facebook/dino-vitb16](https://huggingface.co/facebook/dino-vitb16) | 768-dimensional vision CLS embedding | 224 |
+| `blip` | [Salesforce/blip2-opt-2.7b](https://huggingface.co/Salesforce/blip2-opt-2.7b) | 1408-dimensional vision CLS embedding | 224 |
+| `dino` | [facebook/dinov3-vitb16-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m) | 768-dimensional vision CLS embedding | 224 |
 
-BLIP's caption decoder is discarded after loading, and DINO's pretrained
-representation has no task classifier. Each gets a new classifier sized to the
-dataset; exported embeddings are taken before it. [BLIP's vision encoder](https://proceedings.mlr.press/v162/li22n/li22n.pdf) was
-initialized from an ImageNet-pretrained ViT and then trained for vision-language
-tasks. The selected DINO checkpoint was self-supervised on ImageNet-1k. The newer
-[DINOv2](https://huggingface.co/facebook/dinov2-base) and
-[DINOv3](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m)
-encoders use other pretraining datasets, so `dino` selects the
-ImageNet-trained checkpoint. Set `augments.image_size = 384` in `cfgs/cfg.py`
-for BLIP's native resolution; smaller sizes use positional embedding interpolation.
+Only BLIP-2's vision encoder is instantiated; its Q-Former and language model
+are unnecessary for this classifier. DINOv3's pretrained representation has no
+task classifier. Each gets a new classifier sized to the dataset; exported
+embeddings are taken before it. DINOv3's checkpoint requires accepting its
+model license on Hugging Face and signing in before its weights can be downloaded.
+Both checkpoints use 224-pixel inputs by default. BLIP-2 supports positional
+embedding interpolation at other sizes; DINOv3 accepts sizes divisible by 16.
 BLIP uses the checkpoint's normalization, while ResNet and DINO use ImageNet
-normalization. Training uses random crops, horizontal flips, rotation, color
-jitter, Gaussian blur, and random masking. Evaluation and export use a square
-resize for BLIP and DINO, or resize/center crop for ResNet, followed by the
+normalization. ResNet training uses random crops, horizontal flips, rotation,
+color jitter, Gaussian blur, and random masking. Frozen encoders use deterministic
+preprocessing for both feature extraction and classifier training. Evaluation and
+export use a square resize for BLIP and DINO, or resize/center crop for ResNet, followed by the
 selected model's normalization.
 
 ## Dataset and evaluation
@@ -110,11 +113,18 @@ scheduler and best checkpoint, reserve a separate untouched set if you need an
 unbiased final test score.
 
 Evaluation runs every epoch and ReduceLROnPlateau monitors `eval_loss`. The
-progress bar and model summary are disabled. Only train/evaluation loss and
-accuracy are printed every five epochs; warnings and errors remain visible.
+training progress bar and model summary are disabled. Train/evaluation loss and
+accuracy are printed every five epochs; ResNet export reports progress, and
+BLIP/DINO feature extraction has a per-split progress bar. Warnings and errors
+remain visible.
 All epoch metrics, including learning rate, are saved even between print epochs.
-Training accuracy is measured on augmented training batches. A singleton final
-training batch is dropped for BatchNorm; evaluation and export retain every row.
+ResNet training accuracy is measured on augmented training batches. A singleton
+final ResNet training batch is dropped for BatchNorm; evaluation and export
+retain every row.
+Embedding export uses `export_batch_size` (default 4) independently of the
+training `batch_size`, to keep vision encoder export within memory limits. Set
+it in `cfgs/cfg.py`, in the pipeline image overrides, or with
+`--export-batch-size` in `main.py`.
 
 ## Experiment artifacts
 
@@ -126,7 +136,14 @@ class_to_idx.json      # stable alphabetical label -> integer mapping
 hparams.yaml
 metrics.csv            # train/evaluation metrics and learning rate
 checkpoints/           # best evaluation-loss checkpoint and last.ckpt
+frozen_encoder.pt       # BLIP/DINO only: one copy of the fixed encoder weights
 out/
+  features_train.pt     # BLIP/DINO only: full cached train features
+  feature_labels_train.pt
+  feature_paths_train.csv
+  features_test.pt      # BLIP/DINO only: full cached test features
+  feature_labels_test.pt
+  feature_paths_test.csv
   embeddings_train.pt  # float32 tensor [N_train, embedding_dim]
   labels_train.pt      # int64 tensor [N_train]
   image_paths_train.csv
@@ -139,8 +156,11 @@ Each split's three files contain its images in sorted class/filename order.
 Row `i` of `embeddings_<split>.pt`, element `i` of `labels_<split>.pt`, and
 data row `i` of `image_paths_<split>.csv` refer to the same image. The CSVs
 have an `image_path` header and paths relative to the project root.
-Embeddings come from the final epoch's pooled features immediately before the
-classifier, with augmentation disabled. `class_to_idx.json` decodes labels.
+ResNet embeddings come from the final epoch's pooled features immediately before
+the classifier. BLIP/DINO embeddings come from the frozen encoder before
+classifier training. In both cases export has augmentation disabled.
+`class_to_idx.json` decodes labels. BLIP/DINO classifier checkpoints contain
+only the linear head; `frozen_encoder.pt` stores the encoder once.
 Set `sae_smples` in `cfgs/cfg.py` (or pass `--sae-smples`) to a percentage from
 greater than 0 through 100 (for example, `25.0` exports about a quarter of each
 split). Each split's count is rounded to the nearest image, with a minimum of
@@ -174,6 +194,7 @@ conda activate saes
 python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --model-name basic
 python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --model-name topk --top-k 32
 python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --model-name batch_topk --top-k 32
+python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --concept-expansion-factor 2
 ```
 
 `src/models_sae.py` provides three choices:
@@ -197,9 +218,13 @@ Matplotlib versions; no environment downgrade is needed.
 The SAE reads `out/embeddings_train.pt` directly, infers its input dimension,
 and uses raw training embeddings without additional normalization. Test
 embeddings remain available for separate analysis. The default hidden dimension
-is 2048. A seeded 10% embedding holdout is used for validation and the plateau
-scheduler; its row indices are saved. The image labels are not used. The progress
-bar stays disabled and reconstruction loss, MSE, and mean active-feature count
+is four times the input feature dimension. Set `concept_expansion_factor` to a
+positive integer; for example, a factor of 2 with 512-dimensional image features
+creates 1024 SAE concepts. The resolved count is saved as `nb_concepts` in the
+model architecture for checkpoint loading. A seeded 10% embedding holdout is
+used for validation and the plateau scheduler; its row indices are saved. The
+image labels are not used. The progress bar stays disabled and reconstruction
+loss, MSE, and mean active-feature count
 (`l0`) print every five epochs. Accuracy is not defined for this reconstruction
 task. All epoch metrics are also saved to CSV.
 
@@ -227,7 +252,8 @@ python test_sae.py \
 `--log-dir` also accepts the source image experiment or its `SAE` directory;
 these select the latest completed SAE run. Use the exact SAE run path to select
 a particular model. The script loads the original image model's
-`checkpoints/last.ckpt`, recreates its deterministic preprocessing from
+`checkpoints/last.ckpt` (and `frozen_encoder.pt` for BLIP/DINO), recreates its
+deterministic preprocessing from
 `config.json`, computes image features, and prints one JSON record per image
 with its path and full SAE hidden code (after ReLU/sparsification). It does not
 download ImageNet weights. Keep the source image checkpoint/config with the SAE;
@@ -264,12 +290,18 @@ mean accuracy drop across the other observed classes. The support of a
 neighborhood is the union of its latent supports. Its variance metrics use the
 original training embeddings in that union, with population variance (`N` in
 the denominator). Total variance and mean squared distance to the centroid
-are equal by definition.
+are equal by definition. The steering log also reports `active_state_variance`
+and `active_state_cosine_similarity` for each group: these use the group's SAE
+code vectors on training images in the union support. Variance is the mean
+population variance across the selected latent dimensions; cosine similarity is
+the mean across distinct image pairs. A group with fewer than two nonzero code
+vectors has an empty cosine value. Both metrics are averaged by neighborhood
+size in `summary.csv`.
 
 Results are written to `SAE/<sae-run>/steering/<timestamp>/`:
 
 ```text
-neighborhoods.csv   # each anchor and size: latents, target, drops, support, variance
+neighborhoods.csv   # each anchor and size: latents, drops, support, representation and code statistics
 summary.csv         # means over all anchors and over anchors with nonzero size-1 target drop
 metadata.json       # settings, source runs, class mapping, baseline accuracies
 classifier.pt       # fixed linear classifier weights
@@ -279,5 +311,30 @@ latent_statistics.pt # sampled anchor similarity columns, means and support coun
 If the source image run has moved, pass `--model-log-dir` to its new path. The
 evaluation uses the saved exported splits; if `sae_smples` sampled them in the
 image run, the classifier and metrics use those sampled images.
+
+## Most activated images
+
+The pipeline finishes by ranking train and test images for every SAE latent and
+every size-2-or-larger group in the selected steering run. You can also run this
+stage separately:
+
+```bash
+python main_sae_inference.py \
+  --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
+  --steering-log-dir log_dir/<image-run>/SAE/<sae-run>/steering/<steering-run> \
+  --top-active-images 3
+```
+
+Set `top_active_images` in `INFERENCE_CONFIG` in `cfgs/cfg_sae.py`, through the
+pipeline `inference` overrides, or on the command line. A value of 3 makes a
+3×3 grid of up to nine images. Each `active_images/train/` and
+`active_images/test/` directory contains a `.txt` ranking and `.png` grid for
+each latent and group. The title names the latent or lists the group's members;
+each tile displays its activation. A group scores an image by summing its member
+SAE activations. Only images with a positive score are shown, and ties preserve
+the saved feature order. BLIP/DINO runs use their full cached feature splits;
+other runs use the exported SAE embedding splits, which may be sampled by
+`sae_smples`. If `--steering-log-dir` is omitted, the latest steering run for
+that SAE is used.
 
 Run the integration checks with `python -m unittest discover -s tests -v`.

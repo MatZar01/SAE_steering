@@ -18,9 +18,11 @@ class RunPipelineTest(unittest.TestCase):
         original_image_size = pipeline.IMAGE_CONFIG.augments.image_size
         original_sae_source = pipeline.SAE_CONFIG.model_log_dir
         original_steering_source = pipeline.STEERING_CONFIG.sae_log_dir
+        original_inference_source = pipeline.INFERENCE_CONFIG.sae_log_dir
         image_run = self.root / "experiments" / "image_run"
         sae_run = image_run / "SAE" / "sae_run"
         steering_run = sae_run / "steering" / "steering_run"
+        active_images = sae_run / "active_images"
         events = []
 
         def image_stage(config):
@@ -34,7 +36,7 @@ class RunPipelineTest(unittest.TestCase):
         def sae_stage(config):
             events.append("sae")
             self.assertEqual(config.model_name, "topk")
-            self.assertEqual(config.nb_concepts, 32)
+            self.assertEqual(config.concept_expansion_factor, 2)
             self.assertEqual(config.top_k, 4)
             self.assertEqual(config.model_log_dir, str(image_run))
             return sae_run
@@ -47,23 +49,34 @@ class RunPipelineTest(unittest.TestCase):
             self.assertEqual(config.model_log_dir, str(image_run))
             return steering_run
 
+        def inference_stage(config):
+            events.append("inference")
+            self.assertEqual(config.top_active_images, 2)
+            self.assertEqual(config.sae_log_dir, str(sae_run))
+            self.assertEqual(config.steering_log_dir, str(steering_run))
+            self.assertEqual(config.model_log_dir, str(image_run))
+            return active_images
+
         overrides = {
             "image": {"root_dir": self.root, "log_dir": "experiments",
                       "model_name": "dino", "augments": {"image_size": 384},
                       "scheduler": {"patience": 2}},
-            "sae": {"model_name": "topk", "nb_concepts": 32, "top_k": 4},
+            "sae": {"model_name": "topk", "concept_expansion_factor": 2, "top_k": 4},
             "steering": {"max_anchors": 5, "max_neighborhood_size": 3},
+            "inference": {"top_active_images": 2},
         }
         with (patch.object(pipeline, "run_experiment", side_effect=image_stage),
               patch.object(pipeline, "run_sae_experiment", side_effect=sae_stage),
-              patch.object(pipeline, "run_steering", side_effect=steering_stage)):
+              patch.object(pipeline, "run_steering", side_effect=steering_stage),
+              patch.object(pipeline, "run_sae_inference", side_effect=inference_stage)):
             runs = pipeline.run_pipeline(overrides)
-        self.assertEqual(events, ["image", "sae", "steering"])
+        self.assertEqual(events, ["image", "sae", "steering", "inference"])
         self.assertEqual(runs, {"image": image_run, "sae": sae_run,
-                                "steering": steering_run})
+                                "steering": steering_run, "inference": active_images})
         self.assertEqual(pipeline.IMAGE_CONFIG.augments.image_size, original_image_size)
         self.assertEqual(pipeline.SAE_CONFIG.model_log_dir, original_sae_source)
         self.assertEqual(pipeline.STEERING_CONFIG.sae_log_dir, original_steering_source)
+        self.assertEqual(pipeline.INFERENCE_CONFIG.sae_log_dir, original_inference_source)
 
     def test_invalid_override_fails_before_training(self):
         with patch.object(pipeline, "run_experiment") as image_stage:
@@ -73,6 +86,10 @@ class RunPipelineTest(unittest.TestCase):
                 pipeline.run_pipeline({"sae": {"model_log_dir": "another_run"}})
             with self.assertRaisesRegex(ValueError, "set automatically"):
                 pipeline.run_pipeline({"steering": {"sae_log_dir": "another_run"}})
+            with self.assertRaisesRegex(ValueError, "set automatically"):
+                pipeline.run_pipeline({"inference": {"steering_log_dir": "another_run"}})
+            with self.assertRaisesRegex(ValueError, "top_active_images"):
+                pipeline.run_pipeline({"inference": {"top_active_images": 0}})
             image_stage.assert_not_called()
 
 
