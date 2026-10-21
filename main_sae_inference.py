@@ -13,6 +13,8 @@ def main():
     parser.add_argument("--steering-log-dir", help="Exact steering run; defaults to latest for SAE")
     parser.add_argument("--model-log-dir", help="Override a moved source image run")
     parser.add_argument("--top-active-images", type=int, help="Grid side length (3 means 3x3)")
+    parser.add_argument("--stitch-images", action=argparse.BooleanOptionalAction, default=None,
+                        help="Write PNG grids as well as text rankings (default: enabled)")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--device", help="auto, cpu, cuda, cuda:0, mps, etc.")
     config = deepcopy(INFERENCE_CONFIG)

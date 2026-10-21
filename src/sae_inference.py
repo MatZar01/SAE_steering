@@ -125,7 +125,8 @@ def _render_grid(path: Path, title: str, ranked: list[tuple[int, float]],
 
 
 def _write_result(directory: Path, name: str, title: str, scores: torch.Tensor,
-                  image_paths: list[Path], side: int, score_description: str) -> None:
+                  image_paths: list[Path], side: int, score_description: str,
+                  stitch_images: bool) -> None:
     count = min(side * side, len(scores))
     active = torch.nonzero(scores > 0).flatten()
     if len(active) > count:
@@ -137,7 +138,11 @@ def _write_result(directory: Path, name: str, title: str, scores: torch.Tensor,
     lines += [f"{rank}\t{score:.8g}\t{image_paths[index]}"
               for rank, (index, score) in enumerate(ranked, start=1)]
     (directory / f"{name}.txt").write_text("\n".join(lines) + "\n")
-    _render_grid(directory / f"{name}.png", title, ranked, image_paths, side)
+    grid_path = directory / f"{name}.png"
+    if stitch_images:
+        _render_grid(grid_path, title, ranked, image_paths, side)
+    else:
+        grid_path.unlink(missing_ok=True)
 
 
 def run_sae_inference(config: SAEInferenceConfig) -> Path:
@@ -166,11 +171,12 @@ def run_sae_inference(config: SAEInferenceConfig) -> Path:
         for latent in range(sae.nb_concepts):
             _write_result(directory, f"latent_{latent:04d}", f"Latent {latent}",
                           codes[:, latent], image_paths, config.top_active_images,
-                          "SAE code activation")
+                          "SAE code activation", config.stitch_images)
         for name, title, latents in groups:
             _write_result(directory, name, title, codes[:, latents].sum(dim=1),
                           image_paths, config.top_active_images,
-                          "Sum of SAE code activations for group latents")
-        print(f"Saved {sae.nb_concepts} latent and {len(groups)} group grids for "
+                          "Sum of SAE code activations for group latents", config.stitch_images)
+        artifact_type = "rankings and grids" if config.stitch_images else "text rankings"
+        print(f"Saved {sae.nb_concepts} latent and {len(groups)} group {artifact_type} for "
               f"{split} in {directory}", flush=True)
     return output

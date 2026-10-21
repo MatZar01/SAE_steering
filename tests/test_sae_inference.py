@@ -107,6 +107,22 @@ class SAEInferenceTest(unittest.TestCase):
                 SAEInferenceConfig(sae_log_dir=str(self.sae_run),
                                    top_active_images=value).validate()
 
+    def test_stitch_disabled_keeps_text_and_removes_old_grids(self):
+        config = SAEInferenceConfig(sae_log_dir=str(self.sae_run),
+                                    top_active_images=2, device="cpu")
+        output = run_sae_inference(config)
+        self.assertTrue((output / "train/latent_0000.png").is_file())
+        for path in (self.root / "images").rglob("*.png"):
+            path.unlink()
+        config.stitch_images = False
+        run_sae_inference(config)
+        for split in ("train", "test"):
+            self.assertEqual(len(list((output / split).glob("*.txt"))), 5)
+            self.assertEqual(list((output / split).glob("*.png")), [])
+            self.assertIn("images", (output / split / "latent_0000.txt").read_text())
+        with self.assertRaisesRegex(ValueError, "stitch_images"):
+            SAEInferenceConfig(sae_log_dir=str(self.sae_run), stitch_images="false").validate()
+
     def test_exported_embeddings_used_without_full_feature_cache(self):
         for split in ("train", "test"):
             (self.source / "out" / f"features_{split}.pt").unlink()

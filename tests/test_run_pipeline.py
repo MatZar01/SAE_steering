@@ -53,6 +53,7 @@ class RunPipelineTest(unittest.TestCase):
         def inference_stage(config):
             events.append("inference")
             self.assertEqual(config.top_active_images, 2)
+            self.assertFalse(config.stitch_images)
             self.assertEqual(config.sae_log_dir, str(sae_run))
             self.assertEqual(config.steering_log_dir, str(steering_run))
             self.assertEqual(config.model_log_dir, str(image_run))
@@ -64,7 +65,7 @@ class RunPipelineTest(unittest.TestCase):
                       "scheduler": {"patience": 2}},
             "sae": {"model_name": "topk", "concept_expansion_factor": 2, "top_k": 4},
             "steering": {"max_anchors": 5, "max_neighborhood_size": 3},
-            "inference": {"top_active_images": 2},
+            "inference": {"top_active_images": 2, "stitch_images": False},
         }
         with (patch.object(pipeline, "run_experiment", side_effect=image_stage),
               patch.object(pipeline, "run_sae_experiment", side_effect=sae_stage),

@@ -361,4 +361,10 @@ other runs use the exported SAE embedding splits, which may be sampled by
 `sae_smples`. If `--steering-log-dir` is omitted, the latest steering run for
 that SAE is used.
 
+Set `stitch_images = False` in `INFERENCE_CONFIG`, use
+`"inference": {"stitch_images": False}` in the pipeline, or pass
+`--no-stitch-images` to the standalone command to write only the text rankings.
+This also removes old PNG grids for the same latents and groups when rerunning
+inference in an existing SAE run.
+
 Run the integration checks with `python -m unittest discover -s tests -v`.

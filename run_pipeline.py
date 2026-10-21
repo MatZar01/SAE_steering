@@ -36,6 +36,7 @@ PIPELINE_OVERRIDES = {
     },
     "inference": {
         # "top_active_images": 3,
+        # "stitch_images": False,
         # "batch_size": 512,
     },
 }

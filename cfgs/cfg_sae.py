@@ -130,6 +130,7 @@ class SAEInferenceConfig:
     steering_log_dir: str = ""  # Exact steering run; latest run is used when empty.
     model_log_dir: str = ""  # Optional override for a moved image experiment.
     top_active_images: int = 3  # Grid side length; 3 selects up to 9 images.
+    stitch_images: bool = True  # Save activation grids alongside the text rankings.
     batch_size: int = 512
     device: str = "auto"
 
@@ -141,6 +142,8 @@ class SAEInferenceConfig:
             raise ValueError("Set sae_log_dir in cfgs/cfg_sae.py or pass --sae-log-dir.")
         if type(self.top_active_images) is not int or self.top_active_images < 1:
             raise ValueError("top_active_images must be a positive integer.")
+        if type(self.stitch_images) is not bool:
+            raise ValueError("stitch_images must be a boolean.")
         if type(self.batch_size) is not int or self.batch_size < 1:
             raise ValueError("batch_size must be a positive integer.")
 
