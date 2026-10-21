@@ -25,9 +25,10 @@ class RunPipelineTest(unittest.TestCase):
         active_images = sae_run / "active_images"
         events = []
 
-        def image_stage(config):
+        def image_stage(config, sae_model_name):
             events.append("image")
             self.assertEqual(config.model_name, "dino")
+            self.assertEqual(sae_model_name, "topk")
             self.assertEqual(config.augments.image_size, 384)
             self.assertEqual(config.scheduler.patience, 2)
             self.assertEqual(config.log_dir, "experiments")

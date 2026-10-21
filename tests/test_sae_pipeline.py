@@ -1,6 +1,7 @@
 """SAE behavior, persistence, training, and image-to-code integration tests."""
 
 import contextlib
+import csv
 import io
 import json
 import tempfile
@@ -15,7 +16,7 @@ from cfgs.cfg_sae import SAEConfig
 from src.augments import build_transforms
 from src.models import build_model
 from src.models_sae import build_sae, load_sae
-from src.trainer_sae import run_sae_experiment
+from src.trainer_sae import SAETrainer, run_sae_experiment
 from test_sae import iter_hidden_embeddings, resolve_sae_run
 
 
@@ -67,6 +68,18 @@ class SAEPipelineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "top_k"):
             cfg.concept_count(8)
 
+    def test_epoch_r2_and_dead_neurons_use_all_samples(self):
+        module = SAETrainer(SAEConfig(model_log_dir=str(self.root),
+                                      concept_expansion_factor=2), input_dim=2)
+        module.train_totals[4] = 2
+        module.train_totals[5] = 2
+        module.train_input_sum[:] = torch.tensor([2, 4])
+        module.train_input_squared[:] = torch.tensor([4, 16])
+        module.train_active_counts[:] = torch.tensor([1, 0, 2, 0])
+        r2, dead = module._quality_metrics("train", module.train_totals)
+        self.assertAlmostEqual(r2.item(), 0.8)
+        self.assertEqual(dead.item(), 2)
+
     def test_all_variants_train_save_load(self):
         torch.save(torch.randn(13, 8), self.root / "out/embeddings_train.pt")
         torch.save(torch.randn(3, 7), self.root / "out/embeddings_test.pt")
@@ -80,6 +93,8 @@ class SAEPipelineTest(unittest.TestCase):
                     run = run_sae_experiment(cfg)
                 self.assertEqual(len(output.getvalue().strip().splitlines()), 1)
                 self.assertIn("Epoch 005", output.getvalue())
+                self.assertIn("r2=", output.getvalue())
+                self.assertIn("dead=", output.getvalue())
                 self.assertEqual(run.parent, self.root / "SAE")
                 loaded, artifact = load_sae(run)
                 self.assertEqual(artifact["architecture"]["name"], name)
@@ -89,6 +104,10 @@ class SAEPipelineTest(unittest.TestCase):
                 self.assertEqual(metadata["concept_expansion_factor"], 2)
                 self.assertEqual(metadata["nb_concepts"], 16)
                 self.assertTrue((run / "metrics.csv").is_file())
+                with (run / "metrics.csv").open(newline="") as handle:
+                    metrics = list(csv.DictReader(handle))
+                for key in ("train_r2", "eval_r2", "train_dead_neurons", "eval_dead_neurons"):
+                    self.assertEqual(sum(bool(row[key]) for row in metrics), 5)
                 split = torch.load(run / "split_indices.pt", weights_only=True)
                 self.assertEqual(sorted(torch.cat(list(split.values())).tolist()), list(range(13)))
                 checkpoint = torch.load(run / "last.ckpt", weights_only=True)
@@ -98,7 +117,7 @@ class SAEPipelineTest(unittest.TestCase):
                 self.assertTrue(torch.isfinite(reconstructed).all())
 
     def test_images_use_source_encoder_and_preprocessing(self):
-        cfg = ExperimentConfig(root_dir=self.root, pretrained=False,
+        cfg = ExperimentConfig(root_dir=self.root, model_name="resnet18", pretrained=False,
                                augments=AugmentConfig(image_size=32))
         (self.root / "config.json").write_text(json.dumps(cfg.to_dict()))
         (self.root / "checkpoints").mkdir()

@@ -32,7 +32,7 @@ class PipelineTest(unittest.TestCase):
                     dataset / "train" / label / f"{i:02}.png")
             Image.new("RGB", (32, 32)).save(dataset / "test" / label / "sample.jpg")
         self.config = ExperimentConfig(
-            root_dir=self.root, dataset_path="DS", pretrained=False,
+            root_dir=self.root, dataset_path="DS", model_name="resnet18", pretrained=False,
             epochs=5, batch_size=4, num_workers=0, accelerator="cpu",
             augments=AugmentConfig(image_size=32),
         )
@@ -124,7 +124,7 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("test loss=", lines[0])
         self.assertIn("Exporting train embeddings: 12/12", lines)
         self.assertIn("Exporting test embeddings: 2/2", lines)
-        self.assertRegex(run.name, r"^\d{6}-\d{2}_\d{2}_\d{2}$")
+        self.assertRegex(run.name, r"^\d{6}-\d{2}_\d{2}_\d{2}_resnet18_basic$")
         self.assertEqual({path.name for path in (run / "out").iterdir()},
                          {f"{kind}_{split}.{extension}"
                           for split in ("train", "test")
@@ -148,6 +148,7 @@ class PipelineTest(unittest.TestCase):
                 self.assertTrue(torch.isfinite(embeddings).all())
         self.assertEqual(json.loads((run / "class_to_idx.json").read_text()), {"ant": 0, "zebra": 1})
         metadata = json.loads((run / "config.json").read_text())
+        self.assertEqual(metadata["sae_model_name"], "basic")
         self.assertEqual((metadata["num_train_images"], metadata["num_evaluation_images"]), (12, 2))
         self.assertEqual((metadata["num_export_train_images"], metadata["num_export_test_images"]),
                          (12, 2))

@@ -91,7 +91,7 @@ def run_pipeline(overrides: dict | None = None) -> dict[str, Path]:
     inference.sae_log_dir = str(image.resolve(image.log_dir))
     inference.validate()
 
-    image_run = run_experiment(image)
+    image_run = run_experiment(image, sae_model_name=sae.model_name)
     print(f"Image run: {image_run}", flush=True)
 
     sae.model_log_dir = str(image_run)

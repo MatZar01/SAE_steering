@@ -1,10 +1,14 @@
 """Lightning training, experiment logging, and aligned final-model embeddings."""
 
 import csv
+import errno
+import hashlib
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timedelta
+from importlib.metadata import version
 from pathlib import Path
 from time import monotonic
 
@@ -17,6 +21,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
 from cfgs.cfg import ExperimentConfig
+from cfgs.cfg_sae import CONFIG as DEFAULT_SAE_CONFIG
+from src import augments, models
 from src.data import ImageDataModule
 from src.models import build_model
 from src.scheduler import build_scheduler
@@ -83,11 +89,11 @@ class Classifier(pl.LightningModule):
                 "lr_scheduler": build_scheduler(optimizer, self.config.scheduler)}
 
 
-def create_run_dir(base: Path) -> Path:
+def create_run_dir(base: Path, suffix: str = "") -> Path:
     base.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().replace(microsecond=0)
     while True:
-        run_dir = base / timestamp.strftime("%y%m%d-%H_%M_%S")
+        run_dir = base / (timestamp.strftime("%y%m%d-%H_%M_%S") + suffix)
         try:
             run_dir.mkdir()
             return run_dir
@@ -95,7 +101,8 @@ def create_run_dir(base: Path) -> Path:
             timestamp += timedelta(seconds=1)
 
 
-def save_metadata(run_dir: Path, config: ExperimentConfig, data: ImageDataModule):
+def save_metadata(run_dir: Path, config: ExperimentConfig, data: ImageDataModule,
+                  feature_cache_dir: Path | None = None, sae_model_name: str | None = None):
     metadata = config.to_dict()
     frozen_features = config.model_name.lower() in {"blip", "dino"}
     metadata.update(num_train_images=len(data.train_records),
@@ -104,6 +111,8 @@ def save_metadata(run_dir: Path, config: ExperimentConfig, data: ImageDataModule
                     num_export_test_images=len(data.export_datasets["test"]),
                     embedding_checkpoint="frozen_encoder" if frozen_features else "final_epoch",
                     frozen_feature_training=frozen_features,
+                    sae_model_name=sae_model_name,
+                    feature_cache_dir=str(feature_cache_dir) if feature_cache_dir else None,
                     embedding_order="sorted class/filename within each split",
                     torch_version=torch.__version__, lightning_version=pl.__version__)
     (run_dir / "config.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -168,7 +177,7 @@ def _feature_device(accelerator: str) -> torch.device:
 @torch.inference_mode()
 def cache_frozen_features(model: torch.nn.Module, data: ImageDataModule,
                           out_dir: Path, device: torch.device):
-    """Extract each full split once and derive the SAE subset without another encoder pass."""
+    """Extract each full split once into a shared or run-local directory."""
     out_dir.mkdir(parents=True, exist_ok=True)
     model.to(device).eval()
     full = {}
@@ -202,17 +211,28 @@ def cache_frozen_features(model: torch.nn.Module, data: ImageDataModule,
             writer.writerows((path,) for path in paths)
         (out_dir / (paths_name + ".tmp")).replace(out_dir / paths_name)
 
+    return full
+
+
+def export_cached_embeddings(full: dict, data: ImageDataModule,
+                             cache_dir: Path, out_dir: Path) -> None:
+    """Create each run's selected SAE exports from full frozen features."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for split in ("train", "test"):
+        features, labels = full[split]
+        with (cache_dir / f"feature_paths_{split}.csv").open(newline="") as handle:
+            paths = [row["image_path"] for row in csv.DictReader(handle)]
         positions = {record.path: index for index, record in
                      enumerate(data.feature_datasets[split].records)}
         indices = [positions[record.path] for record in data.export_datasets[split].records]
         selected = len(indices) == len(features) and all(i == index for i, index in enumerate(indices))
         names = ((f"embeddings_{split}.pt", f"features_{split}.pt", features),
                  (f"labels_{split}.pt", f"feature_labels_{split}.pt", labels),
-                 (f"image_paths_{split}.csv", paths_name, paths))
+                 (f"image_paths_{split}.csv", f"feature_paths_{split}.csv", paths))
         for output_name, source_name, values in names:
             destination = out_dir / output_name
             if selected:
-                destination.hardlink_to(out_dir / source_name)
+                _link_cached_file(cache_dir / source_name, destination)
             elif output_name.endswith(".pt"):
                 torch.save(values[indices], out_dir / (output_name + ".tmp"))
                 (out_dir / (output_name + ".tmp")).replace(destination)
@@ -222,11 +242,90 @@ def cache_frozen_features(model: torch.nn.Module, data: ImageDataModule,
                     writer.writerow(["image_path"])
                     writer.writerows((paths[index],) for index in indices)
                 (out_dir / (output_name + ".tmp")).replace(destination)
+
+
+def _link_cached_file(source: Path, destination: Path) -> None:
+    try:
+        destination.hardlink_to(source)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        destination.symlink_to(source.resolve())
+
+
+def _cache_identity(config: ExperimentConfig, data: ImageDataModule) -> dict:
+    """Include all inputs that affect frozen features, excluding classifier settings."""
+    checkpoint = (models.BLIP_CHECKPOINT if config.model_name.lower() == "blip"
+                  else models.DINO_CHECKPOINT)
+    records = {}
+    for split, split_records in (("train", data.train_records), ("test", data.eval_records)):
+        records[split] = [
+            [str(record.path.resolve()), record.label, record.path.stat().st_size,
+             record.path.stat().st_mtime_ns]
+            for record in split_records
+        ]
+    return {
+        "format_version": 1, "model_name": config.model_name.lower(),
+        "checkpoint": checkpoint, "pretrained": True,
+        "image_size": config.augments.image_size,
+        "class_to_idx": data.class_to_idx, "records": records,
+        "model_code_sha256": hashlib.sha256(Path(models.__file__).read_bytes()).hexdigest(),
+        "transform_code_sha256": hashlib.sha256(Path(augments.__file__).read_bytes()).hexdigest(),
+        "torch_version": torch.__version__,
+        "transformers_version": version("transformers"),
+        "torchvision_version": version("torchvision"),
+    }
+
+
+def _shared_cache_dir(config: ExperimentConfig, data: ImageDataModule) -> tuple[Path, dict]:
+    identity = _cache_identity(config, data)
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
+    return config.resolve("features") / config.model_name.lower() / digest, identity
+
+
+def _load_feature_cache(cache_dir: Path, identity: dict, data: ImageDataModule):
+    manifest = cache_dir / "manifest.json"
+    if not manifest.is_file():
+        return None
+    try:
+        if json.loads(manifest.read_text()) != identity:
+            return None
+    except (OSError, ValueError):
+        return None
+    if not (cache_dir / "frozen_encoder.pt").is_file():
+        return None
+    full = {}
+    for split in ("train", "test"):
+        try:
+            features = torch.load(cache_dir / f"features_{split}.pt",
+                                  map_location="cpu", weights_only=True)
+            labels = torch.load(cache_dir / f"feature_labels_{split}.pt",
+                                map_location="cpu", weights_only=True)
+            with (cache_dir / f"feature_paths_{split}.csv").open(newline="") as handle:
+                paths = [row["image_path"] for row in csv.DictReader(handle)]
+        except (OSError, ValueError, RuntimeError, KeyError):
+            return None
+        records = data.feature_datasets[split].records
+        expected_paths = [Path(os.path.relpath(record.path, data.config.root_dir.resolve())).as_posix()
+                          for record in records]
+        expected_labels = torch.tensor([data.class_to_idx[record.label] for record in records])
+        if (not isinstance(features, torch.Tensor) or features.ndim != 2
+                or not features.is_floating_point() or not torch.isfinite(features).all()
+                or not isinstance(labels, torch.Tensor) or labels.shape != (len(records),)
+                or not torch.equal(labels, expected_labels) or paths != expected_paths
+                or len(features) != len(records)):
+            return None
+        full[split] = (features.float(), labels.long())
     return full
 
 
-def run_experiment(config: ExperimentConfig) -> Path:
+def run_experiment(config: ExperimentConfig, sae_model_name: str | None = None) -> Path:
     config.validate()
+    sae_model_name = DEFAULT_SAE_CONFIG.model_name if sae_model_name is None else sae_model_name
+    if sae_model_name not in {"basic", "topk", "batch_topk"}:
+        raise ValueError("sae_model_name must be basic, topk, or batch_topk.")
+    if config.model_name.lower() not in models.MODEL_REGISTRY:
+        raise ValueError(f"Unknown vision model {config.model_name!r}.")
     # Keep normal console output to the requested epoch summaries; errors/warnings remain visible.
     for name in ("pytorch_lightning", "lightning_fabric"):
         logging.getLogger(name).setLevel(logging.WARNING)
@@ -234,27 +333,49 @@ def run_experiment(config: ExperimentConfig) -> Path:
     data = ImageDataModule(config)
     data.setup()
     frozen_features = config.model_name.lower() in {"blip", "dino"}
-    image_model = (build_model(config.model_name, len(data.class_to_idx), config.pretrained)
-                   if frozen_features else None)
+    shared_cache = frozen_features and config.pretrained
+    cache_dir, identity = (_shared_cache_dir(config, data) if shared_cache else (None, None))
+    features = _load_feature_cache(cache_dir, identity, data) if shared_cache else None
     module = None if frozen_features else Classifier(config, len(data.class_to_idx))
-    run_dir = create_run_dir(config.resolve(config.log_dir))
+    suffix = f"_{config.model_name.lower()}_{sae_model_name}"
+    run_dir = create_run_dir(config.resolve(config.log_dir), suffix=suffix)
     logger = CSVLogger(save_dir=str(run_dir), name="", version="")
     # Initialize in the empty directory before writing our own experiment metadata.
     _ = logger.experiment
     (run_dir / "out").mkdir()
-    save_metadata(run_dir, config, data)
+    save_metadata(run_dir, config, data, cache_dir, sae_model_name)
     if frozen_features:
-        device = _feature_device(config.accelerator)
-        features = cache_frozen_features(image_model, data, run_dir / "out", device)
-        image_model.backbone.cpu()
+        storage_dir = cache_dir if shared_cache else run_dir / "out"
+        if features is None:
+            if shared_cache:
+                (storage_dir / "manifest.json").unlink(missing_ok=True)
+            image_model = build_model(config.model_name, len(data.class_to_idx), config.pretrained)
+            features = cache_frozen_features(image_model, data, storage_dir,
+                                             _feature_device(config.accelerator))
+            image_model.backbone.cpu()
+            encoder_tmp = storage_dir / "frozen_encoder.pt.tmp"
+            torch.save({"state_dict": image_model.backbone.state_dict(),
+                        "embedding_dim": image_model.embedding_dim}, encoder_tmp)
+            encoder_tmp.replace(storage_dir / "frozen_encoder.pt")
+            feature_dim = image_model.embedding_dim
+            del image_model
+            if shared_cache:
+                if _cache_identity(config, data) != identity:
+                    raise RuntimeError("Images changed during feature extraction; retry the run.")
+                manifest_tmp = storage_dir / "manifest.json.tmp"
+                manifest_tmp.write_text(json.dumps(identity, indent=2) + "\n")
+                manifest_tmp.replace(storage_dir / "manifest.json")
+        else:
+            print(f"Reusing cached {config.model_name} features from {storage_dir}", flush=True)
+            feature_dim = features["train"][0].shape[1]
+        if any(part[0].shape[1] != feature_dim for part in features.values()):
+            raise ValueError("Cached feature dimension differs from frozen encoder.")
+        export_cached_embeddings(features, data, storage_dir, run_dir / "out")
         encoder_path = run_dir / "frozen_encoder.pt"
-        encoder_tmp = encoder_path.with_suffix(".pt.tmp")
-        torch.save({"state_dict": image_model.backbone.state_dict(),
-                    "embedding_dim": image_model.embedding_dim},
-                   encoder_tmp)
-        encoder_tmp.replace(encoder_path)
-        feature_dim = image_model.embedding_dim
-        del image_model
+        if shared_cache:
+            _link_cached_file(storage_dir / "frozen_encoder.pt", encoder_path)
+        else:
+            (storage_dir / "frozen_encoder.pt").replace(encoder_path)
         module = Classifier(config, len(data.class_to_idx), feature_dim=feature_dim)
         train_features, train_labels = features["train"]
         test_features, test_labels = features["test"]

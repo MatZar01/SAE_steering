@@ -12,6 +12,7 @@ python main.py --epochs 50 --batch-size 32 --learning-rate 0.0003
 python main.py --model-name blip --batch-size 16
 python main.py --model-name dino --batch-size 32
 python main.py --model-name blip --export-batch-size 2
+python main.py --model-name dino --sae-model-name topk
 ```
 
 To run image training, SAE training, neighborhood steering, and active-image
@@ -49,16 +50,22 @@ are resolved from the project root, independent of the working directory.
 and `embedding_dim` so its features can be exported for SAE training. The image
 model is selected in `cfgs/cfg.py` or with `--model-name` in `main.py`. The linked
 `cfgs/cfg_sae.py` controls the separate SAE stage and its `model_name` chooses
-`basic`, `topk`, or `batch_topk`.
+`basic`, `topk`, or `batch_topk`. An image run's folder name includes both model
+names. In the pipeline, the SAE model name comes from the `sae` overrides;
+standalone `main.py` uses the SAE config default or `--sae-model-name`.
 
-The default model is ImageNet-pretrained ResNet-18, fine-tuned end to end with
-AdamW. The other image models are fixed encoders with a new linear classifier;
+ResNet-18 can be fine-tuned end to end with AdamW. BLIP and DINO are fixed
+encoders with a new linear classifier;
 their train and test features are extracted once, then only the classifier is
 optimized from the saved features. Extraction displays a progress bar for each
 split. The number of outputs is taken from the training class folders. Their
-pretrained weights are downloaded on first use;
+pretrained weights are downloaded on first use. For pretrained BLIP/DINO, the
+full feature cache lives under `features/<model>/<cache-key>/` at the project
+root. Later runs with the same images, encoder and preprocessing reuse it without
+loading the pretrained encoder. Changes to image files or image size create a
+new cache key; classifier settings and `sae_smples` can change while reusing it.
 `--no-pretrained` skips the download for offline smoke runs and gives a randomly
-initialized, frozen encoder.
+initialized, frozen encoder; those features remain local to that run.
 
 | Model name | Checkpoint | Frozen features | Suggested input size |
 | --- | --- | --- | --- |
@@ -128,7 +135,7 @@ it in `cfgs/cfg.py`, in the pipeline image overrides, or with
 
 ## Experiment artifacts
 
-Each run creates `log_dir/YYMMDD-hh_mm_ss/` containing:
+Each image run creates `log_dir/YYMMDD-hh_mm_ss_<vision>_<sae>/` containing:
 
 ```text
 config.json            # configuration, image counts, versions
@@ -136,14 +143,8 @@ class_to_idx.json      # stable alphabetical label -> integer mapping
 hparams.yaml
 metrics.csv            # train/evaluation metrics and learning rate
 checkpoints/           # best evaluation-loss checkpoint and last.ckpt
-frozen_encoder.pt       # BLIP/DINO only: one copy of the fixed encoder weights
+frozen_encoder.pt       # BLIP/DINO only: saved fixed encoder weights
 out/
-  features_train.pt     # BLIP/DINO only: full cached train features
-  feature_labels_train.pt
-  feature_paths_train.csv
-  features_test.pt      # BLIP/DINO only: full cached test features
-  feature_labels_test.pt
-  feature_paths_test.csv
   embeddings_train.pt  # float32 tensor [N_train, embedding_dim]
   labels_train.pt      # int64 tensor [N_train]
   image_paths_train.csv
@@ -151,6 +152,20 @@ out/
   labels_test.pt       # int64 tensor [N_test]
   image_paths_test.csv
 ```
+
+Pretrained frozen runs also use a shared cache outside `log_dir`:
+
+```text
+features/<model>/<cache-key>/
+  manifest.json         # cache identity; written only after extraction completes
+  frozen_encoder.pt     # reused by image runs
+  features_train.pt, feature_labels_train.pt, feature_paths_train.csv
+  features_test.pt, feature_labels_test.pt, feature_paths_test.csv
+```
+
+The run's `config.json` records `feature_cache_dir`. Unsampled SAE exports and
+the encoder file link to this cache, avoiding duplicate storage.
+Offline `--no-pretrained` runs keep the full feature files in their own `out/`.
 
 Each split's three files contain its images in sorted class/filename order.
 Row `i` of `embeddings_<split>.pt`, element `i` of `labels_<split>.pt`, and
@@ -174,7 +189,7 @@ full splits.
 import csv
 import torch
 
-run = "log_dir/YYMMDD-hh_mm_ss"
+run = "log_dir/YYMMDD-hh_mm_ss_dino_topk"
 for split in ("train", "test"):
     embeddings = torch.load(f"{run}/out/embeddings_{split}.pt", weights_only=True)
     labels = torch.load(f"{run}/out/labels_{split}.pt", weights_only=True)
@@ -191,10 +206,10 @@ on the command line:
 
 ```bash
 conda activate saes
-python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --model-name basic
-python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --model-name topk --top-k 32
-python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --model-name batch_topk --top-k 32
-python main_sae.py --model-log-dir log_dir/YYMMDD-hh_mm_ss --concept-expansion-factor 2
+python main_sae.py --model-log-dir log_dir/<image-run> --model-name basic
+python main_sae.py --model-log-dir log_dir/<image-run> --model-name topk --top-k 32
+python main_sae.py --model-log-dir log_dir/<image-run> --model-name batch_topk --top-k 32
+python main_sae.py --model-log-dir log_dir/<image-run> --concept-expansion-factor 2
 ```
 
 `src/models_sae.py` provides three choices:
@@ -224,9 +239,11 @@ creates 1024 SAE concepts. The resolved count is saved as `nb_concepts` in the
 model architecture for checkpoint loading. A seeded 10% embedding holdout is
 used for validation and the plateau scheduler; its row indices are saved. The
 image labels are not used. The progress bar stays disabled and reconstruction
-loss, MSE, and mean active-feature count
-(`l0`) print every five epochs. Accuracy is not defined for this reconstruction
-task. All epoch metrics are also saved to CSV.
+loss, MSE, mean active-feature count (`l0`), R², and dead-neuron count print every
+five epochs for both training and validation. R² uses total squared reconstruction
+error against the per-feature mean of that epoch's samples. A dead neuron never
+has a positive code on that split during the epoch. Accuracy is not defined for
+this reconstruction task. All epoch metrics are also saved to CSV.
 
 Every SAE experiment gets a separate directory inside its source experiment:
 
@@ -234,7 +251,7 @@ Every SAE experiment gets a separate directory inside its source experiment:
 log_dir/<image-run>/SAE/<YYMMDD-hh_mm_ss>/
   config.json         # SAE settings, source path, dimensions, package versions
   hparams.yaml
-  metrics.csv         # loss, MSE, L1, L0 and learning rate
+  metrics.csv         # loss, MSE, L1, L0, R², dead neurons, learning rate
   split_indices.pt    # train/val indices into the source embeddings tensor
   model.pt            # final SAE architecture, weights and inference threshold
   last.ckpt           # final Lightning checkpoint, including optimizer state
@@ -267,9 +284,9 @@ the saved image embeddings, labels, and SAE checkpoint. Set `sae_log_dir` in
 image run:
 
 ```bash
-python main_steering.py --sae-log-dir log_dir/YYMMDD-hh_mm_ss/SAE/YYMMDD-hh_mm_ss
+python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run>
 # Evaluate every eligible anchor and neighborhood sizes 1 through 16:
-python main_steering.py --sae-log-dir log_dir/YYMMDD-hh_mm_ss/SAE/YYMMDD-hh_mm_ss \
+python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
   --all-anchors --max-neighborhood-size 16
 ```
 
@@ -297,6 +314,13 @@ population variance across the selected latent dimensions; cosine similarity is
 the mean across distinct image pairs. A group with fewer than two nonzero code
 vectors has an empty cosine value. Both metrics are averaged by neighborhood
 size in `summary.csv`.
+
+Every accuracy-drop result also has a probability-drop result. It measures the
+decrease in the classifier's softmax probability for each image's true class
+relative to the unmodified SAE reconstruction. Target and per-class values are
+means over their class images, non-target values average the other class means,
+and overall values average all test images. `summary.csv` includes matching
+probability means and size-1 changes.
 
 Results are written to `SAE/<sae-run>/steering/<timestamp>/`:
 

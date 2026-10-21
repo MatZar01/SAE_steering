@@ -55,12 +55,14 @@ def _groups(path: Path, num_latents: int) -> list[tuple[str, str, list[int]]]:
     return groups
 
 
-def _split_inputs(source: Path, split: str, image_root: Path, input_dim: int):
+def _split_inputs(source: Path, split: str, image_root: Path, input_dim: int,
+                  cache_dir: Path | None = None):
     out = source / "out"
-    full = out / f"features_{split}.pt"
+    full_dir = cache_dir if cache_dir is not None else out
+    full = full_dir / f"features_{split}.pt"
     if full.is_file():
         features_path = full
-        paths_path = out / f"feature_paths_{split}.csv"
+        paths_path = full_dir / f"feature_paths_{split}.csv"
     else:
         features_path = out / f"embeddings_{split}.pt"
         paths_path = out / f"image_paths_{split}.csv"
@@ -150,11 +152,14 @@ def run_sae_inference(config: SAEInferenceConfig) -> Path:
               (sae_run / artifact["source_model_relative_path"]).resolve())
     if not (source / "config.json").is_file() and not config.model_log_dir:
         source = Path(artifact["source_model_log_dir"])
-    image_root = Path(json.loads((source / "config.json").read_text())["root_dir"])
+    source_config = json.loads((source / "config.json").read_text())
+    image_root = Path(source_config["root_dir"])
+    cache_dir = (Path(source_config["feature_cache_dir"])
+                 if source_config.get("feature_cache_dir") else None)
     output = sae_run / "active_images"
     for split in ("train", "test"):
         features, image_paths = _split_inputs(
-            source, split, image_root, artifact["architecture"]["input_dim"])
+            source, split, image_root, artifact["architecture"]["input_dim"], cache_dir)
         codes = _codes(sae, features, config.batch_size, device)
         directory = output / split
         directory.mkdir(parents=True, exist_ok=True)

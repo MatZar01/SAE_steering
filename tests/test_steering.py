@@ -111,14 +111,32 @@ class SteeringTest(unittest.TestCase):
         labels = torch.load(self.source / "out/labels_test.pt", weights_only=True)
         with torch.inference_mode():
             codes = sae.encode(test)[1]
-            baseline = head(sae.decode(codes)).argmax(dim=1)
+            baseline_logits = head(sae.decode(codes))
+            baseline = baseline_logits.argmax(dim=1)
+            baseline_true_probability = baseline_logits.softmax(dim=1).gather(
+                1, labels[:, None]).squeeze(1)
             for row in rows:
                 modified = codes.clone()
                 modified[:, [int(latent) for latent in row["latents"].split("|")]] = 0
-                ablated = head(sae.decode(modified)).argmax(dim=1)
+                ablated_logits = head(sae.decode(modified))
+                ablated = ablated_logits.argmax(dim=1)
                 expected_drop = ((baseline == labels).float().mean()
                                  - (ablated == labels).float().mean()).item()
                 self.assertAlmostEqual(expected_drop, float(row["overall_accuracy_drop"]))
+                ablated_true_probability = ablated_logits.softmax(dim=1).gather(
+                    1, labels[:, None]).squeeze(1)
+                probability_change = baseline_true_probability - ablated_true_probability
+                self.assertAlmostEqual(probability_change.mean().item(),
+                                       float(row["overall_probability_drop"]), places=6)
+                target = int(row["target_class_index"])
+                self.assertAlmostEqual(probability_change[labels == target].mean().item(),
+                                       float(row["target_probability_drop"]), places=6)
+                self.assertAlmostEqual(probability_change[labels != target].mean().item(),
+                                       float(row["non_target_mean_probability_drop"]), places=6)
+                class_drops = json.loads(row["class_probability_drops"])
+                for label_name, index in (("left", 0), ("right", 1)):
+                    self.assertAlmostEqual(probability_change[labels == index].mean().item(),
+                                           class_drops[label_name], places=6)
         anchor_ids = stats["anchor_ids"].tolist()
         similarity = stats["similarity"]
         for column, anchor in enumerate(anchor_ids):
@@ -146,7 +164,12 @@ class SteeringTest(unittest.TestCase):
                 group = [row for row in rows if int(row["size"]) == int(summary["size"])]
                 expected = sum(float(row["active_state_variance"]) for row in group) / len(group)
                 self.assertAlmostEqual(float(summary["mean_active_state_variance"]), expected)
+                expected_probability = sum(float(row["overall_probability_drop"])
+                                           for row in group) / len(group)
+                self.assertAlmostEqual(float(summary["mean_overall_probability_drop"]),
+                                       expected_probability)
         self.assertIn("SAE code vector", metadata["active_state_metrics"])
+        self.assertIn("softmax probability", metadata["probability_drop_definition"])
 
     def test_invalid_configuration_fails_before_loading(self):
         with self.assertRaisesRegex(ValueError, "tversky_penalty"):

@@ -16,18 +16,24 @@ from src.trainer import create_run_dir
 
 RESULT_FIELDS = (
     "anchor", "size", "latents", "target_class", "target_class_index",
-    "target_accuracy_drop", "non_target_mean_accuracy_drop", "overall_accuracy_drop",
+    "target_accuracy_drop", "target_probability_drop",
+    "non_target_mean_accuracy_drop", "non_target_mean_probability_drop",
+    "overall_accuracy_drop", "overall_probability_drop",
     "support_size", "mean_per_dimension_variance", "total_variance",
     "mean_squared_distance_to_centroid", "active_state_variance",
-    "active_state_cosine_similarity", "class_accuracy_drops",
+    "active_state_cosine_similarity", "class_accuracy_drops", "class_probability_drops",
 )
 SUMMARY_FIELDS = (
     "population", "size", "anchors", "mean_target_accuracy_drop",
-    "mean_non_target_accuracy_drop", "mean_overall_accuracy_drop",
+    "mean_target_probability_drop", "mean_non_target_accuracy_drop",
+    "mean_non_target_probability_drop", "mean_overall_accuracy_drop",
+    "mean_overall_probability_drop",
     "mean_support_size", "mean_per_dimension_variance", "mean_total_variance",
     "mean_squared_distance_to_centroid", "mean_active_state_variance",
     "mean_active_state_cosine_similarity", "target_drop_change_from_size_1",
-    "non_target_drop_change_from_size_1", "total_variance_change_from_size_1",
+    "target_probability_drop_change_from_size_1",
+    "non_target_drop_change_from_size_1", "non_target_probability_drop_change_from_size_1",
+    "total_variance_change_from_size_1",
 )
 
 
@@ -135,6 +141,7 @@ def _test_codes_and_baseline(sae: nn.Module, classifier: nn.Module,
     codes = torch.empty((len(embeddings), sae.nb_concepts), dtype=torch.float32)
     reconstructions = torch.empty_like(embeddings)
     baseline_correct = torch.zeros(num_classes, dtype=torch.long)
+    baseline_probability = torch.zeros(num_classes, dtype=torch.float64)
     for start in range(0, len(embeddings), batch_size):
         end = min(start + batch_size, len(embeddings))
         batch_codes = sae.encode(embeddings[start:end].to(device))[1]
@@ -143,11 +150,16 @@ def _test_codes_and_baseline(sae: nn.Module, classifier: nn.Module,
         codes[start:end] = batch_codes.cpu()
         reconstructed = sae.decode(batch_codes)
         reconstructions[start:end] = reconstructed.cpu()
-        prediction = classifier(reconstructed).argmax(dim=1).cpu()
+        logits = classifier(reconstructed)
+        prediction = logits.argmax(dim=1).cpu()
         batch_labels = labels[start:end]
         baseline_correct += torch.bincount(batch_labels[prediction == batch_labels],
                                            minlength=num_classes)
-    return codes, reconstructions, baseline_correct
+        true_probabilities = logits.softmax(dim=1).gather(
+            1, batch_labels.to(device)[:, None]).squeeze(1).cpu().double()
+        baseline_probability += torch.bincount(
+            batch_labels, weights=true_probabilities, minlength=num_classes)
+    return codes, reconstructions, baseline_correct, baseline_probability
 
 
 @torch.inference_mode()
@@ -155,19 +167,25 @@ def _ablated_correct_by_size(classifier: nn.Module, codes: torch.Tensor,
                              reconstructions: torch.Tensor, dictionary: torch.Tensor,
                              labels: torch.Tensor, neighborhood: list[int],
                              batch_size: int, num_classes: int,
-                             device: torch.device) -> torch.Tensor:
+                             device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     """Subtract each new latent's exact linear decoder contribution."""
     correct = torch.zeros((len(neighborhood), num_classes), dtype=torch.long)
+    probability = torch.zeros((len(neighborhood), num_classes), dtype=torch.float64)
     for start in range(0, len(codes), batch_size):
         end = min(start + batch_size, len(codes))
         reconstructed = reconstructions[start:end].to(device).clone()
         batch_labels = labels[start:end]
         for size, latent in enumerate(neighborhood):
             reconstructed -= codes[start:end, latent].to(device)[:, None] * dictionary[latent]
-            prediction = classifier(reconstructed).argmax(dim=1).cpu()
+            logits = classifier(reconstructed)
+            prediction = logits.argmax(dim=1).cpu()
             correct[size] += torch.bincount(batch_labels[prediction == batch_labels],
                                              minlength=num_classes)
-    return correct
+            true_probabilities = logits.softmax(dim=1).gather(
+                1, batch_labels.to(device)[:, None]).squeeze(1).cpu().double()
+            probability[size] += torch.bincount(
+                batch_labels, weights=true_probabilities, minlength=num_classes)
+    return correct, probability
 
 
 def _neighborhood_variance(embeddings: torch.Tensor, support: torch.Tensor,
@@ -234,8 +252,11 @@ def _summaries(rows: list[dict], max_size: int) -> list[dict]:
             summary = {"population": population, "size": size, "anchors": len(group)}
             metrics = (
                 ("mean_target_accuracy_drop", "target_accuracy_drop"),
+                ("mean_target_probability_drop", "target_probability_drop"),
                 ("mean_non_target_accuracy_drop", "non_target_mean_accuracy_drop"),
+                ("mean_non_target_probability_drop", "non_target_mean_probability_drop"),
                 ("mean_overall_accuracy_drop", "overall_accuracy_drop"),
+                ("mean_overall_probability_drop", "overall_probability_drop"),
                 ("mean_support_size", "support_size"),
                 ("mean_per_dimension_variance", "mean_per_dimension_variance"),
                 ("mean_total_variance", "total_variance"),
@@ -248,7 +269,9 @@ def _summaries(rows: list[dict], max_size: int) -> list[dict]:
                 summary[output_name] = statistics.fmean(values) if values else None
             for output_name, row_name in (
                 ("target_drop_change_from_size_1", "target_accuracy_drop"),
+                ("target_probability_drop_change_from_size_1", "target_probability_drop"),
                 ("non_target_drop_change_from_size_1", "non_target_mean_accuracy_drop"),
+                ("non_target_probability_drop_change_from_size_1", "non_target_mean_probability_drop"),
                 ("total_variance_change_from_size_1", "total_variance"),
             ):
                 summary[output_name] = (statistics.fmean(row[row_name] - at_one[row["anchor"]][row_name]
@@ -325,24 +348,28 @@ def run_steering(config: SteeringConfig) -> Path:
     code_columns = {latent: column for column, latent in enumerate(selected_latents)}
     train_codes = _selected_training_codes(
         sae, train_embeddings, selected_latents, config.evaluation_batch_size, device)
-    test_codes, reconstructions, baseline_correct = _test_codes_and_baseline(
+    test_codes, reconstructions, baseline_correct, baseline_probability = _test_codes_and_baseline(
         sae, classifier, test_embeddings, test_labels,
         config.evaluation_batch_size, num_classes, device)
     dictionary = sae.get_dictionary().detach()
     baseline_accuracy = baseline_correct.double() / test_counts.clamp_min(1)
     baseline_overall = baseline_correct.sum().item() / len(test_labels)
+    baseline_probability_by_class = baseline_probability / test_counts.clamp_min(1)
+    baseline_probability_overall = baseline_probability.sum().item() / len(test_labels)
 
     rows = []
     for column, neighborhood in enumerate(neighborhoods):
         anchor = neighborhood[0]
-        correct_by_size = _ablated_correct_by_size(
+        correct_by_size, probability_by_size = _ablated_correct_by_size(
             classifier, test_codes, reconstructions, dictionary, test_labels,
             neighborhood, config.evaluation_batch_size, num_classes, device)
         first_drop = baseline_accuracy - correct_by_size[0].double() / test_counts.clamp_min(1)
         target = min(observed_classes, key=lambda idx: (-first_drop[idx].item(), idx))
-        for size, (correct, variance) in enumerate(zip(correct_by_size,
+        for size, (correct, probability, variance) in enumerate(zip(correct_by_size,
+                probability_by_size,
                 _neighborhood_variance(train_embeddings, support, neighborhood)), start=1):
             drops = baseline_accuracy - correct.double() / test_counts.clamp_min(1)
+            probability_drops = baseline_probability_by_class - probability / test_counts.clamp_min(1)
             support_size, mean_variance, total_variance = variance
             active_variance, active_cosine = _active_state_metrics(
                 train_codes, support, neighborhood[:size], code_columns)
@@ -351,9 +378,14 @@ def run_steering(config: SteeringConfig) -> Path:
                 "latents": "|".join(map(str, neighborhood[:size])),
                 "target_class": class_names[target], "target_class_index": target,
                 "target_accuracy_drop": drops[target].item(),
+                "target_probability_drop": probability_drops[target].item(),
                 "non_target_mean_accuracy_drop": statistics.fmean(
                     drops[idx].item() for idx in observed_classes if idx != target),
+                "non_target_mean_probability_drop": statistics.fmean(
+                    probability_drops[idx].item() for idx in observed_classes if idx != target),
                 "overall_accuracy_drop": baseline_overall - correct.sum().item() / len(test_labels),
+                "overall_probability_drop": (baseline_probability_overall
+                                             - probability.sum().item() / len(test_labels)),
                 "support_size": support_size,
                 "mean_per_dimension_variance": mean_variance,
                 "total_variance": total_variance,
@@ -363,6 +395,8 @@ def run_steering(config: SteeringConfig) -> Path:
                 "active_state_cosine_similarity": active_cosine,
                 "class_accuracy_drops": json.dumps({class_names[idx]: drops[idx].item()
                                                      for idx in observed_classes}),
+                "class_probability_drops": json.dumps({class_names[idx]: probability_drops[idx].item()
+                                                        for idx in observed_classes}),
             })
         if (column + 1) % max(1, len(anchors) // 20) == 0 or column + 1 == len(anchors):
             print(f"Evaluated anchor {column + 1}/{len(anchors)} (latent {anchor})", flush=True)
@@ -393,6 +427,10 @@ def run_steering(config: SteeringConfig) -> Path:
             "code norm; null when fewer than two such images exist."
         ),
         "accuracy_drop_baseline": "unmodified SAE reconstruction on exported test embeddings",
+        "probability_drop_definition": (
+            "Mean decrease in softmax probability assigned to each image's true class, "
+            "relative to the unmodified SAE reconstruction on exported test embeddings."
+        ),
         "nonzero_size_1_anchors": sum(abs(row["target_accuracy_drop"]) > 1e-12
                                       for row in rows if row["size"] == 1),
         "classifier_original_train_accuracy": train_original.sum().item() / len(train_labels),

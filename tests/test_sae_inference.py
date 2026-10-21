@@ -118,6 +118,21 @@ class SAEInferenceTest(unittest.TestCase):
             self.assertEqual(len(rows), 4)
             self.assertTrue(rows[3].endswith(f"images/{split}/0.png"))
 
+    def test_shared_feature_cache_used_for_full_split(self):
+        cache = self.root / "features/dino/example"
+        cache.mkdir(parents=True)
+        for split in ("train", "test"):
+            for prefix, extension in (("features", "pt"), ("feature_paths", "csv")):
+                name = f"{prefix}_{split}.{extension}"
+                (self.source / "out" / name).replace(cache / name)
+        (self.source / "config.json").write_text(json.dumps({
+            "root_dir": str(self.root), "feature_cache_dir": str(cache),
+        }))
+        output = run_sae_inference(SAEInferenceConfig(
+            sae_log_dir=str(self.sae_run), top_active_images=2, device="cpu"))
+        rows = (output / "train/latent_0000.txt").read_text().splitlines()
+        self.assertTrue(rows[3].endswith("images/train/1.png"))
+
 
 if __name__ == "__main__":
     unittest.main()

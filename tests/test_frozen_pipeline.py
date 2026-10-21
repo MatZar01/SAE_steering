@@ -4,6 +4,7 @@ import contextlib
 import csv
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,6 +108,48 @@ class FrozenPipelineTest(unittest.TestCase):
                 with torch.inference_mode():
                     expected = sae.encode(test)[1]
                 torch.testing.assert_close(torch.stack([code for _, code in rows]), expected)
+
+    def test_pretrained_cache_reused_and_invalidated_by_image_change(self):
+        with patch.dict(MODEL_REGISTRY, {"dino": TinyFrozenModel}):
+            TinyFrozenModel.feature_calls = 0
+            config = ExperimentConfig(
+                root_dir=self.root, dataset_path="DS", log_dir="runs",
+                model_name="dino", pretrained=True, epochs=1, batch_size=4,
+                export_batch_size=4, num_workers=0, accelerator="cpu",
+                sae_smples=40, augments=AugmentConfig(image_size=32),
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                first = run_experiment(config, sae_model_name="topk")
+            self.assertTrue(first.name.endswith("_dino_topk"))
+            self.assertEqual(TinyFrozenModel.feature_calls, 4)
+            cache = Path(json.loads((first / "config.json").read_text())["feature_cache_dir"])
+            self.assertEqual(cache.parent, self.root / "features/dino")
+            self.assertTrue((cache / "manifest.json").is_file())
+            self.assertTrue((cache / "features_train.pt").is_file())
+            self.assertFalse((first / "out/features_train.pt").exists())
+            self.assertEqual(torch.load(first / "out/embeddings_train.pt", weights_only=True).shape,
+                             (5, 4))
+            config.sae_smples = None
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                second = run_experiment(config)
+            self.assertTrue(second.name.endswith("_dino_basic"))
+            self.assertIn("Reusing cached dino features", output.getvalue())
+            self.assertEqual(TinyFrozenModel.feature_calls, 4)
+            self.assertEqual(json.loads((second / "config.json").read_text())
+                             ["feature_cache_dir"], str(cache))
+            self.assertEqual(torch.load(second / "out/embeddings_train.pt", weights_only=True).shape,
+                             (12, 4))
+            self.assertEqual((second / "frozen_encoder.pt").stat().st_ino,
+                             (cache / "frozen_encoder.pt").stat().st_ino)
+            image = self.root / "DS/train/ant/00.png"
+            stamp = image.stat().st_mtime_ns
+            os.utime(image, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
+            with contextlib.redirect_stdout(io.StringIO()):
+                third = run_experiment(config)
+            self.assertEqual(TinyFrozenModel.feature_calls, 8)
+            self.assertNotEqual(json.loads((third / "config.json").read_text())
+                                ["feature_cache_dir"], str(cache))
 
 
 if __name__ == "__main__":
