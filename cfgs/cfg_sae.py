@@ -84,6 +84,8 @@ class SteeringConfig:
     max_anchors: int | None = 128  # None evaluates every latent with nonempty support.
     max_neighborhood_size: int = 8  # Every size from 1 through this value is evaluated.
     tversky_penalty: float = 0.5  # Equal penalty for each one-sided support difference.
+    tversky_mode: str = "support"  # support, coherence
+    coherence_pairs: int = 64  # Distinct image pairs sampled per latent pair in coherence mode.
     classifier_epochs: int = 100
     classifier_batch_size: int = 1024
     classifier_learning_rate: float = 1e-3
@@ -104,6 +106,10 @@ class SteeringConfig:
             raise ValueError("Neighborhood size and evaluation batch size must be positive.")
         if not 0 < self.tversky_penalty <= 1:
             raise ValueError("tversky_penalty must be in (0, 1].")
+        if self.tversky_mode not in {"support", "coherence"}:
+            raise ValueError("tversky_mode must be support or coherence.")
+        if type(self.coherence_pairs) is not int or self.coherence_pairs < 1:
+            raise ValueError("coherence_pairs must be a positive integer.")
         if self.classifier_epochs < 1 or self.classifier_batch_size < 1:
             raise ValueError("Classifier epochs and batch size must be positive.")
         if self.classifier_learning_rate <= 0 or self.classifier_weight_decay < 0:

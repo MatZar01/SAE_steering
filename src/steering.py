@@ -5,6 +5,7 @@ import json
 import statistics
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -97,24 +98,30 @@ def _correct_counts(classifier: nn.Module, embeddings: torch.Tensor,
 
 @torch.inference_mode()
 def _training_support(sae: nn.Module, embeddings: torch.Tensor,
-                      batch_size: int, device: torch.device):
+                      batch_size: int, device: torch.device,
+                      collect_activity: bool = False):
     """Use the full exported training set for means, activity, and strict supports."""
     num_latents = sae.nb_concepts
     activation_sum = torch.zeros(num_latents, dtype=torch.float64)
     active_count = torch.zeros(num_latents, dtype=torch.long)
+    activity_masks = [] if collect_activity else None
     for batch in embeddings.split(batch_size):
         codes = sae.encode(batch.to(device))[1].cpu()
         if not torch.isfinite(codes).all():
             raise ValueError("SAE produced non-finite training codes.")
         activation_sum += codes.sum(dim=0, dtype=torch.float64)
-        active_count += (codes > 0).sum(dim=0)
+        active = codes > 0
+        active_count += active.sum(dim=0)
+        if activity_masks is not None:
+            packed = np.packbits(active.numpy(), axis=1, bitorder="little")
+            activity_masks.extend(int.from_bytes(row.tobytes(), "little") for row in packed)
     mean_activation = activation_sum / len(embeddings)
     support = torch.empty((len(embeddings), num_latents), dtype=torch.bool)
     for start in range(0, len(embeddings), batch_size):
         end = min(start + batch_size, len(embeddings))
         codes = sae.encode(embeddings[start:end].to(device))[1].cpu()
         support[start:end] = codes > mean_activation
-    return mean_activation, active_count, support
+    return mean_activation, active_count, support, activity_masks
 
 
 def _similarity_to_anchors(support: torch.Tensor, anchors: torch.Tensor,
@@ -131,6 +138,50 @@ def _similarity_to_anchors(support: torch.Tensor, anchors: torch.Tensor,
     exclusive = counts[:, None] + counts[anchors][None, :] - 2 * intersection
     denominator = intersection + penalty * exclusive
     return intersection / denominator.masked_fill(denominator == 0, 1)
+
+
+def _coherence_similarity_to_anchors(support: torch.Tensor, activity_masks: list[int],
+                                     anchors: torch.Tensor, penalty: float,
+                                     pairs: int, seed: int) -> torch.Tensor:
+    """Mean image-pair Tversky on binary SAE activity; identical images are excluded."""
+    support_columns = support.T.contiguous().numpy()
+    support_ids = [np.flatnonzero(column).astype(np.int32) for column in support_columns]
+    active_counts = [mask.bit_count() for mask in activity_masks]
+    similarity = torch.zeros((support.shape[1], len(anchors)), dtype=torch.float64)
+    anchor_positions = {int(anchor): column for column, anchor in enumerate(anchors)}
+    for column, anchor_tensor in enumerate(anchors):
+        anchor = int(anchor_tensor)
+        first = support_ids[anchor]
+        for latent, second in enumerate(support_ids):
+            if len(second) == 0:
+                continue
+            if latent in anchor_positions and latent < anchor:
+                similarity[latent, column] = similarity[anchor, anchor_positions[latent]]
+                continue
+            if len(first) == len(second) == 1 and first[0] == second[0]:
+                continue
+            left, right = sorted((anchor, latent))
+            rng = np.random.default_rng(np.random.SeedSequence(
+                [seed & 0xFFFFFFFF, left, right]))
+            sampled_first = rng.choice(first, size=pairs)
+            sampled_second = rng.choice(second, size=pairs)
+            same = sampled_first == sampled_second
+            while same.any():
+                count = int(same.sum())
+                sampled_first[same] = rng.choice(first, size=count)
+                sampled_second[same] = rng.choice(second, size=count)
+                same = sampled_first == sampled_second
+            total = 0.0
+            for image_a, image_b in zip(sampled_first, sampled_second):
+                intersection = (activity_masks[image_a] & activity_masks[image_b]).bit_count()
+                exclusive = active_counts[image_a] + active_counts[image_b] - 2 * intersection
+                denominator = intersection + penalty * exclusive
+                total += intersection / denominator if denominator else 0.0
+            similarity[latent, column] = total / pairs
+        if (column + 1) % max(1, len(anchors) // 20) == 0 or column + 1 == len(anchors):
+            print(f"Computed coherence for anchor {column + 1}/{len(anchors)} "
+                  f"(latent {anchor})", flush=True)
+    return similarity
 
 
 @torch.inference_mode()
@@ -322,8 +373,9 @@ def run_steering(config: SteeringConfig) -> Path:
                                      config.evaluation_batch_size, num_classes, device)
     test_original = _correct_counts(classifier, test_embeddings, test_labels,
                                     config.evaluation_batch_size, num_classes, device)
-    mean_activation, active_count, support = _training_support(
-        sae, train_embeddings, config.evaluation_batch_size, device)
+    mean_activation, active_count, support, activity_masks = _training_support(
+        sae, train_embeddings, config.evaluation_batch_size, device,
+        collect_activity=config.tversky_mode == "coherence")
     support_counts = support.sum(dim=0)
     eligible = torch.nonzero((active_count > 0) & (support_counts > 0)).flatten()
     if len(eligible) == 0:
@@ -334,8 +386,13 @@ def run_steering(config: SteeringConfig) -> Path:
     else:
         anchors = eligible
     max_size = min(config.max_neighborhood_size, len(eligible))
-    similarity = _similarity_to_anchors(support, anchors, config.tversky_penalty,
-                                        config.evaluation_batch_size, device)
+    if config.tversky_mode == "coherence":
+        similarity = _coherence_similarity_to_anchors(
+            support, activity_masks, anchors, config.tversky_penalty,
+            config.coherence_pairs, config.seed)
+    else:
+        similarity = _similarity_to_anchors(support, anchors, config.tversky_penalty,
+                                            config.evaluation_batch_size, device)
     neighborhoods = []
     for column, anchor_tensor in enumerate(anchors):
         anchor = int(anchor_tensor)
@@ -409,6 +466,7 @@ def run_steering(config: SteeringConfig) -> Path:
                 "input_dim": train_embeddings.shape[1], "num_classes": num_classes},
                run_dir / "classifier.pt")
     torch.save({"anchor_ids": anchors, "similarity": similarity.float(),
+                "tversky_mode": config.tversky_mode,
                 "mean_activation": mean_activation.float(),
                 "active_count": active_count, "support_count": support_counts},
                run_dir / "latent_statistics.pt")
@@ -418,7 +476,14 @@ def run_steering(config: SteeringConfig) -> Path:
         "num_non_dead_latents": int((active_count > 0).sum()),
         "num_eligible_latents": len(eligible), "num_sampled_anchors": len(anchors),
         "max_evaluated_size": max_size,
-        "similarity": "|A∩B| / (|A∩B| + penalty*(|A\\B| + |B\\A|))",
+        "similarity": (
+            "Mean over sampled distinct training-image pairs (x in A's support, y in B's support) "
+            "of |P(x)∩P(y)| / (|P(x)∩P(y)| + penalty*(|P(x)\\P(y)| + |P(y)\\P(x)|)); "
+            "P(x)={k: z_k(x)>0}. Pairs are sampled with replacement using a seed specific to "
+            "each unordered latent pair. Score is zero if only an identical-image pair exists."
+            if config.tversky_mode == "coherence" else
+            "|A∩B| / (|A∩B| + penalty*(|A\\B| + |B\\A|))"
+        ),
         "support": "z_k(x) > mean_train(z_k)",
         "active_state_metrics": (
             "On training images in the union of group supports, use the group's SAE code vector "

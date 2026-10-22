@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--all-anchors", action="store_true")
     parser.add_argument("--max-neighborhood-size", type=int)
     parser.add_argument("--tversky-penalty", type=float)
+    parser.add_argument("--tversky-mode", choices=["support", "coherence"])
+    parser.add_argument("--coherence-pairs", type=int)
     parser.add_argument("--classifier-epochs", type=int)
     parser.add_argument("--classifier-batch-size", type=int)
     parser.add_argument("--classifier-learning-rate", type=float)

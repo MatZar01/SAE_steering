@@ -288,6 +288,9 @@ python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run>
 # Evaluate every eligible anchor and neighborhood sizes 1 through 16:
 python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
   --all-anchors --max-neighborhood-size 16
+# Use image-pair coherence to rank neighbors:
+python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
+  --tversky-mode coherence --coherence-pairs 64
 ```
 
 The runner fits one linear classifier to the exported original training
@@ -297,6 +300,15 @@ empty support are excluded. Neighbors are ranked by symmetric Tversky overlap
 of support sets, `|A∩B| / (|A∩B| + p(|A∖B| + |B∖A|))`, with `p=0.5` by default;
 equal scores use latent index order. The default samples up to 128 eligible
 anchors with seed 42 and evaluates every neighborhood size from 1 through 8.
+Set `tversky_mode="coherence"` in `SteeringConfig` (or the pipeline's `steering`
+overrides) to rank neighbors by image-pair coherence instead. Each latent's
+support still uses its mean training activation. For each pair of latents, the
+runner samples `coherence_pairs` pairs of distinct training images, one from
+each support, with replacement and a reproducible seed per unordered latent
+pair. It converts each image to the set of *all* SAE latents with positive code,
+computes Tversky similarity between those binary sets, and averages the
+scores. A latent pair whose supports contain only the same image scores zero.
+The resulting ranking feeds the same neighborhood ablation evaluation.
 
 Ablation zeros the neighborhood's codes, decodes the result, and passes it to
 the fixed classifier. Accuracy drops are measured against the unmodified SAE

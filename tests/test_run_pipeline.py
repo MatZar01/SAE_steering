@@ -46,6 +46,8 @@ class RunPipelineTest(unittest.TestCase):
             events.append("steering")
             self.assertEqual(config.max_anchors, 5)
             self.assertEqual(config.max_neighborhood_size, 3)
+            self.assertEqual(config.tversky_mode, "coherence")
+            self.assertEqual(config.coherence_pairs, 7)
             self.assertEqual(config.sae_log_dir, str(sae_run))
             self.assertEqual(config.model_log_dir, str(image_run))
             return steering_run
@@ -64,7 +66,8 @@ class RunPipelineTest(unittest.TestCase):
                       "model_name": "dino", "augments": {"image_size": 384},
                       "scheduler": {"patience": 2}},
             "sae": {"model_name": "topk", "concept_expansion_factor": 2, "top_k": 4},
-            "steering": {"max_anchors": 5, "max_neighborhood_size": 3},
+            "steering": {"max_anchors": 5, "max_neighborhood_size": 3,
+                         "tversky_mode": "coherence", "coherence_pairs": 7},
             "inference": {"top_active_images": 2, "stitch_images": False},
         }
         with (patch.object(pipeline, "run_experiment", side_effect=image_stage),

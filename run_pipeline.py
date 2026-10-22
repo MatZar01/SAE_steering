@@ -33,6 +33,8 @@ PIPELINE_OVERRIDES = {
     "steering": {
         # "max_anchors": 128,
         # "max_neighborhood_size": 16,
+        # "tversky_mode": "coherence",
+        # "coherence_pairs": 64,
     },
     "inference": {
         # "top_active_images": 3,

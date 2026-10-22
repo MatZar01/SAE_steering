@@ -12,7 +12,7 @@ from torch import nn
 
 from cfgs.cfg_sae import SteeringConfig
 from src.models_sae import build_sae, load_sae
-from src.steering import _active_state_metrics, run_steering
+from src.steering import _active_state_metrics, _coherence_similarity_to_anchors, run_steering
 
 
 class SteeringTest(unittest.TestCase):
@@ -61,6 +61,54 @@ class SteeringTest(unittest.TestCase):
         variance, cosine = _active_state_metrics(codes, support, [0, 1], columns)
         self.assertAlmostEqual(variance, 0.625)
         self.assertAlmostEqual(cosine, 0.0)
+
+    def test_coherence_uses_full_image_activity_and_excludes_identical_pairs(self):
+        support = torch.eye(3, dtype=torch.bool)
+        anchors = torch.tensor([0, 1])
+        similarity = _coherence_similarity_to_anchors(
+            support, [0b011, 0b011, 0b100], anchors, 0.5, 8, 42)
+        self.assertEqual(similarity[1, 0].item(), 1.0)
+        self.assertEqual(similarity[0, 1].item(), 1.0)
+        self.assertEqual(similarity[2, 0].item(), 0.0)
+
+        partial = _coherence_similarity_to_anchors(
+            torch.eye(2, dtype=torch.bool), [0b011, 0b101],
+            torch.tensor([0]), 0.5, 8, 42)
+        self.assertEqual(partial[1, 0].item(), 0.5)
+
+        overlapping = _coherence_similarity_to_anchors(
+            torch.ones((2, 2), dtype=torch.bool), [0b01, 0b10],
+            torch.tensor([0]), 0.5, 8, 42)
+        self.assertEqual(overlapping[1, 0].item(), 0.0)
+
+        shared_only = torch.tensor([[True, True], [False, False]])
+        similarity = _coherence_similarity_to_anchors(
+            shared_only, [0b11, 0], torch.tensor([0]), 0.5, 8, 42)
+        self.assertEqual(similarity[1, 0].item(), 0.0)
+
+    def test_coherence_mode_ranks_and_evaluates_neighborhoods(self):
+        config = SteeringConfig(sae_log_dir=str(self.sae_run), max_anchors=None,
+                                max_neighborhood_size=3, tversky_mode="coherence",
+                                coherence_pairs=12, classifier_epochs=2,
+                                classifier_batch_size=4, evaluation_batch_size=3,
+                                device="cpu")
+        output = run_steering(config)
+        with (output / "neighborhoods.csv").open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        metadata = json.loads((output / "metadata.json").read_text())
+        stats = torch.load(output / "latent_statistics.pt", weights_only=True)
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(stats["tversky_mode"], "coherence")
+        self.assertEqual(metadata["config"]["coherence_pairs"], 12)
+        self.assertIn("distinct training-image pairs", metadata["similarity"])
+        for column, anchor in enumerate(stats["anchor_ids"].tolist()):
+            expected = [anchor] + sorted(
+                (latent for latent in range(4) if latent != anchor and stats["support_count"][latent] > 0),
+                key=lambda latent: (-stats["similarity"][latent, column].item(), latent))
+            actual = [int(latent) for latent in next(
+                row for row in rows if int(row["anchor"]) == anchor and int(row["size"]) == 3
+            )["latents"].split("|")]
+            self.assertEqual(actual, expected)
 
     def test_nested_neighborhoods_fixed_targets_and_population_outputs(self):
         config = SteeringConfig(sae_log_dir=str(self.sae_run), max_anchors=None,
@@ -174,6 +222,10 @@ class SteeringTest(unittest.TestCase):
     def test_invalid_configuration_fails_before_loading(self):
         with self.assertRaisesRegex(ValueError, "tversky_penalty"):
             run_steering(SteeringConfig(sae_log_dir=str(self.sae_run), tversky_penalty=0))
+        with self.assertRaisesRegex(ValueError, "tversky_mode"):
+            SteeringConfig(sae_log_dir=str(self.sae_run), tversky_mode="unknown").validate()
+        with self.assertRaisesRegex(ValueError, "coherence_pairs"):
+            SteeringConfig(sae_log_dir=str(self.sae_run), coherence_pairs=0).validate()
 
     def test_topk_and_batch_topk_checkpoints(self):
         train = torch.load(self.source / "out/embeddings_train.pt", weights_only=True)
