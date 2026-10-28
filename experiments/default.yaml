@@ -1,0 +1,86 @@
+# One complete pipeline run. Paths linking later stages to earlier runs are automatic.
+# Values match the current dataclass defaults in cfgs/cfg.py and cfgs/cfg_sae.py.
+image:
+  dataset_path: DS/cifar10
+  log_dir: log_dir
+  model_name: dino
+  pretrained: true
+  epochs: 30
+  batch_size: 64
+  export_batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_workers: 4
+  seed: 42
+  accelerator: auto
+  precision: 32-true
+  deterministic: true
+  train_batches: 1024
+  val_batches: 1024
+  sae_smples: null
+  print_every_n_epochs: 5
+  augments:
+    image_size: 224
+    crop_scale: [0.8, 1.0]
+    horizontal_flip_probability: 0.5
+    vertical_flip_probability: 0.0
+    color_jitter: 0.2
+    rotation_degrees: 10.0
+    gaussian_blur_probability: 0.2
+    gaussian_blur_kernel: 3
+    gaussian_blur_sigma: [0.1, 2.0]
+    masking_probability: 0.25
+    masking_scale: [0.02, 0.15]
+  scheduler:
+    factor: 0.5
+    patience: 3
+    threshold: 0.0001
+    cooldown: 0
+    min_lr: 0.0000001
+
+sae:
+  model_name: basic
+  concept_expansion_factor: 4
+  top_k: 32
+  l1_coefficient: 0.001
+  dead_neuron_reanimation: false
+  reanimation_loss_coefficient: 0.1
+  reanimation_top_k: 32
+  threshold_momentum: 0.9
+  epochs: 50
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0
+  validation_fraction: 0.1
+  num_workers: 0
+  seed: 42
+  accelerator: auto
+  precision: 32-true
+  deterministic: true
+  print_every_n_epochs: 5
+  scheduler:
+    factor: 0.5
+    patience: 3
+    threshold: 0.0001
+    cooldown: 0
+    min_lr: 0.0000001
+
+steering:
+  max_anchors: 128
+  max_neighborhood_size: 8
+  tversky_penalty: 0.5
+  tversky_mode: support  # support, coherence, decoder_cosine, random
+  coherence_pairs: 64
+  classifier_epochs: 100
+  classifier_batch_size: 1024
+  classifier_learning_rate: 0.001
+  classifier_weight_decay: 0.0001
+  evaluation_batch_size: 512
+  seed: 42
+  device: auto
+
+inference:
+  top_active_images: 3
+  stitch_images: true
+  batch_size: 512
+  device: auto

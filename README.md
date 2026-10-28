@@ -22,6 +22,24 @@ inference in one sequence, edit the four dictionaries in `run_pipeline.py` and r
 python run_pipeline.py
 ```
 
+To run several complete pipelines sequentially, put one `.yaml` or `.yml` file
+per experiment in `experiments/` and run:
+
+```bash
+python run_multiple_pipeline.py
+# Optional alternate config directory:
+python run_multiple_pipeline.py --experiments-dir path/to/configs
+```
+
+`experiments/default.yaml` lists the current defaults. Copy it for each new
+experiment and edit the `image`, `sae`, `steering`, and `inference` sections.
+Files run in filename order; the runner reads and validates all YAML files before
+starting training. YAML lists for tuple-valued augmentation settings are converted to
+tuples. The runner uses `run_pipeline()` for each file, so stage output paths
+are linked automatically. Each experiment gets its own image and SAE run; the
+usual feature cache can still be reused. Install `PyYAML` from
+`requirements.txt` to use this runner.
+
 For example, the override dictionary can contain:
 
 ```python

@@ -6,3 +6,4 @@ Pillow>=10
 overcomplete==0.2.2
 numpy>=1.26
 tqdm>=4.66
+PyYAML>=6

@@ -30,6 +30,7 @@ class RunPipelineTest(unittest.TestCase):
             self.assertEqual(config.model_name, "dino")
             self.assertEqual(sae_model_name, "topk")
             self.assertEqual(config.augments.image_size, 384)
+            self.assertEqual(config.augments.crop_scale, (0.7, 1.0))
             self.assertEqual(config.scheduler.patience, 2)
             self.assertEqual(config.log_dir, "experiments")
             return image_run
@@ -66,7 +67,8 @@ class RunPipelineTest(unittest.TestCase):
 
         overrides = {
             "image": {"root_dir": self.root, "log_dir": "experiments",
-                      "model_name": "dino", "augments": {"image_size": 384},
+                      "model_name": "dino", "augments": {"image_size": 384,
+                                                      "crop_scale": [0.7, 1.0]},
                       "scheduler": {"patience": 2}},
             "sae": {"model_name": "topk", "concept_expansion_factor": 2, "top_k": 4,
                     "dead_neuron_reanimation": True,

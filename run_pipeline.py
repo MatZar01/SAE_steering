@@ -67,12 +67,14 @@ def _apply_overrides(config, overrides: dict, stage: str) -> None:
             _apply_overrides(current, value, f"{stage}.{name}")
         elif isinstance(value, dict):
             raise TypeError(f"{stage}.{name} is not a nested config.")
+        elif isinstance(current, tuple) and isinstance(value, list):
+            setattr(config, name, tuple(value))
         else:
             setattr(config, name, value)
 
 
-def run_pipeline(overrides: dict | None = None) -> dict[str, Path]:
-    """Return the exact run directories created by the four stages."""
+def prepare_pipeline_configs(overrides: dict | None = None):
+    """Apply and validate every stage's settings without starting training."""
     overrides = PIPELINE_OVERRIDES if overrides is None else overrides
     if not isinstance(overrides, dict):
         raise TypeError("Pipeline overrides must be a dictionary.")
@@ -96,6 +98,12 @@ def run_pipeline(overrides: dict | None = None) -> dict[str, Path]:
     steering.validate()
     inference.sae_log_dir = str(image.resolve(image.log_dir))
     inference.validate()
+    return image, sae, steering, inference
+
+
+def run_pipeline(overrides: dict | None = None) -> dict[str, Path]:
+    """Return the exact run directories created by the four stages."""
+    image, sae, steering, inference = prepare_pipeline_configs(overrides)
 
     image_run = run_experiment(image, sae_model_name=sae.model_name)
     print(f"Image run: {image_run}", flush=True)
