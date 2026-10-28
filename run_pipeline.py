@@ -28,12 +28,15 @@ PIPELINE_OVERRIDES = {
         # "model_name": "topk",
         # "concept_expansion_factor": 4,
         # "top_k": 32,
+        # "dead_neuron_reanimation": True,
+        # "reanimation_loss_coefficient": 0.1,
+        # "reanimation_top_k": 32,
         # "epochs": 30,
     },
     "steering": {
         # "max_anchors": 128,
         # "max_neighborhood_size": 16,
-        # "tversky_mode": "coherence",
+        # "tversky_mode": "decoder_cosine",  # support, coherence, decoder_cosine, random
         # "coherence_pairs": 64,
     },
     "inference": {

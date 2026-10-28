@@ -12,7 +12,9 @@ from torch import nn
 
 from cfgs.cfg_sae import SteeringConfig
 from src.models_sae import build_sae, load_sae
-from src.steering import _active_state_metrics, _coherence_similarity_to_anchors, run_steering
+from src.steering import (_active_state_metrics, _coherence_similarity_to_anchors,
+                          _decoder_cosine_to_anchors, _random_similarity_to_anchors,
+                          run_steering)
 
 
 class SteeringTest(unittest.TestCase):
@@ -109,6 +111,66 @@ class SteeringTest(unittest.TestCase):
                 row for row in rows if int(row["anchor"]) == anchor and int(row["size"]) == 3
             )["latents"].split("|")]
             self.assertEqual(actual, expected)
+
+    def test_decoder_cosine_uses_decoder_rows(self):
+        dictionary = torch.tensor([[1.0, 0.0], [0.0, 2.0],
+                                   [-3.0, 0.0], [0.0, 0.0]])
+        similarity = _decoder_cosine_to_anchors(dictionary, torch.tensor([0, 2]))
+        torch.testing.assert_close(similarity, torch.tensor([
+            [1.0, -1.0], [0.0, 0.0], [-1.0, 1.0], [0.0, 0.0],
+        ]))
+
+    def test_random_similarity_is_seeded_and_symmetric(self):
+        anchors = torch.tensor([0, 2, 3])
+        similarity = _random_similarity_to_anchors(5, anchors, 42)
+        torch.testing.assert_close(similarity,
+                                   _random_similarity_to_anchors(5, anchors, 42))
+        self.assertFalse(torch.equal(similarity,
+                                     _random_similarity_to_anchors(5, anchors, 43)))
+        self.assertTrue(((similarity >= 0) & (similarity <= 1)).all())
+        for column, anchor in enumerate(anchors.tolist()):
+            self.assertEqual(similarity[anchor, column].item(), 1.0)
+            for other_column, other in enumerate(anchors.tolist()):
+                self.assertEqual(similarity[other, column].item(),
+                                 similarity[anchor, other_column].item())
+
+    def test_cosine_and_random_modes_run_complete_steering(self):
+        for mode in ("decoder_cosine", "random"):
+            with self.subTest(mode=mode):
+                config = SteeringConfig(
+                    sae_log_dir=str(self.sae_run), max_anchors=None,
+                    max_neighborhood_size=3, tversky_mode=mode,
+                    classifier_epochs=2, classifier_batch_size=4,
+                    evaluation_batch_size=3, device="cpu")
+                output = run_steering(config)
+                with (output / "neighborhoods.csv").open(newline="") as handle:
+                    rows = list(csv.DictReader(handle))
+                stats = torch.load(output / "latent_statistics.pt", weights_only=True)
+                metadata = json.loads((output / "metadata.json").read_text())
+                self.assertEqual(len(rows), 9)
+                self.assertEqual(stats["tversky_mode"], mode)
+                self.assertEqual(metadata["config"]["tversky_mode"], mode)
+                if mode == "decoder_cosine":
+                    sae, _ = load_sae(self.sae_run)
+                    directions = F.normalize(sae.get_dictionary(), dim=1)
+                    expected = directions @ directions[stats["anchor_ids"]].T
+                    torch.testing.assert_close(stats["similarity"], expected)
+                    self.assertIn("decoder weight vectors", metadata["similarity"])
+                else:
+                    expected = _random_similarity_to_anchors(
+                        4, stats["anchor_ids"], config.seed)
+                    torch.testing.assert_close(stats["similarity"], expected)
+                    self.assertIn("uniform random", metadata["similarity"])
+                for column, anchor in enumerate(stats["anchor_ids"].tolist()):
+                    ranked = sorted(
+                        (latent for latent in range(4) if latent != anchor
+                         and stats["support_count"][latent] > 0),
+                        key=lambda latent: (-stats["similarity"][latent, column].item(), latent))
+                    actual = [int(latent) for latent in next(
+                        row for row in rows if int(row["anchor"]) == anchor
+                        and int(row["size"]) == 3
+                    )["latents"].split("|")]
+                    self.assertEqual(actual, [anchor] + ranked)
 
     def test_nested_neighborhoods_fixed_targets_and_population_outputs(self):
         config = SteeringConfig(sae_log_dir=str(self.sae_run), max_anchors=None,

@@ -80,6 +80,60 @@ class SAEPipelineTest(unittest.TestCase):
         self.assertAlmostEqual(r2.item(), 0.8)
         self.assertEqual(dead.item(), 2)
 
+    def test_reanimation_gives_inactive_relu_neuron_a_gradient(self):
+        cfg = SAEConfig(model_log_dir=str(self.root), concept_expansion_factor=2,
+                        dead_neuron_reanimation=True, reanimation_top_k=1)
+        module = SAETrainer(cfg, input_dim=2)
+        with torch.no_grad():
+            module.model.dictionary._weights[0] = torch.tensor([1.0, 0.0])
+        module.dead_neuron_mask[0] = True
+        x = torch.tensor([[1.0, 0.0]])
+        pre_codes = torch.tensor([[-2.0, 0.0, 0.0, 0.0]], requires_grad=True)
+        codes = torch.zeros_like(pre_codes)
+        auxiliary = module._reanimation_loss(x, pre_codes, codes, torch.zeros_like(x))
+        self.assertGreater(auxiliary.item(), 0)
+        auxiliary.backward()
+        self.assertNotEqual(pre_codes.grad[0, 0].item(), 0)
+        self.assertEqual(pre_codes.grad[0, 1:].abs().sum().item(), 0)
+        self.assertTrue(module.dead_neuron_mask[0].item())
+
+        active_codes = codes.detach().clone()
+        active_codes[0, 0] = 1
+        self.assertEqual(module._reanimation_loss(x, pre_codes, active_codes,
+                                                   torch.zeros_like(x)).item(), 0)
+        self.assertFalse(module.dead_neuron_mask[0].item())
+
+    def test_reanimation_config_validation(self):
+        for field, value in (("dead_neuron_reanimation", 1),
+                             ("reanimation_loss_coefficient", 0),
+                             ("reanimation_loss_coefficient", float("nan")),
+                             ("reanimation_top_k", 0)):
+            with self.subTest(field=field, value=value):
+                cfg = SAEConfig(model_log_dir=str(self.root))
+                setattr(cfg, field, value)
+                with self.assertRaisesRegex(ValueError, field):
+                    cfg.validate()
+
+    def test_enabled_reanimation_is_logged_during_training(self):
+        torch.save(torch.randn(13, 8), self.root / "out/embeddings_train.pt")
+        cfg = SAEConfig(model_log_dir=str(self.root), model_name="topk",
+                        concept_expansion_factor=2, top_k=1, epochs=3,
+                        batch_size=5, accelerator="cpu", print_every_n_epochs=1,
+                        dead_neuron_reanimation=True, reanimation_top_k=2)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            run = run_sae_experiment(cfg)
+        with (run / "metrics.csv").open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        values = [float(row["train_reanimation_loss"]) for row in rows
+                  if row["train_reanimation_loss"]]
+        self.assertEqual(len(values), 3)
+        self.assertEqual(values[0], 0)
+        self.assertTrue(any(value > 0 for value in values[1:]))
+        self.assertIn("reanimation=", output.getvalue())
+        metadata = json.loads((run / "config.json").read_text())
+        self.assertTrue(metadata["dead_neuron_reanimation"])
+
     def test_all_variants_train_save_load(self):
         torch.save(torch.randn(13, 8), self.root / "out/embeddings_train.pt")
         torch.save(torch.randn(3, 7), self.root / "out/embeddings_test.pt")

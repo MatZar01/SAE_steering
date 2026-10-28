@@ -210,6 +210,7 @@ python main_sae.py --model-log-dir log_dir/<image-run> --model-name basic
 python main_sae.py --model-log-dir log_dir/<image-run> --model-name topk --top-k 32
 python main_sae.py --model-log-dir log_dir/<image-run> --model-name batch_topk --top-k 32
 python main_sae.py --model-log-dir log_dir/<image-run> --concept-expansion-factor 2
+python main_sae.py --model-log-dir log_dir/<image-run> --dead-neuron-reanimation
 ```
 
 `src/models_sae.py` provides three choices:
@@ -219,6 +220,19 @@ python main_sae.py --model-log-dir log_dir/<image-run> --concept-expansion-facto
 | `basic` | ReLU codes with an L1 penalty | MSE + `l1_coefficient * mean(sum(abs(codes)))` |
 | `topk` | At most `top_k` nonzero codes per image | MSE |
 | `batch_topk` | Global threshold selecting `batch_size * top_k` activations during training | MSE |
+
+Optional dead-neuron reanimation works with all three variants. Set
+`dead_neuron_reanimation=True` in `SAEConfig`, the pipeline's `sae` overrides,
+or pass `--dead-neuron-reanimation` to `main_sae.py`. Neurons with no positive
+codes during the previous training epoch become candidates. For each image, the
+`reanimation_top_k` candidates with the highest pre-activations reconstruct the
+detached residual left by the main SAE; softplus gives even negative
+pre-activations a gradient. Their auxiliary MSE is multiplied by
+`reanimation_loss_coefficient` (default 0.1) and added to the training loss.
+Candidates stop receiving this loss as soon as they fire. The first epoch has
+no reanimation loss. `train_reanimation_loss` logs the unweighted auxiliary MSE;
+it also appears in the epoch printout when enabled. Set the switch to `False`
+or pass `--no-dead-neuron-reanimation` to disable it.
 
 All variants use Overcomplete's linear/ReLU encoder without BatchNorm and its
 L2-normalized dictionary. Batch Top-K scales its budget for the actual batch
@@ -251,7 +265,7 @@ Every SAE experiment gets a separate directory inside its source experiment:
 log_dir/<image-run>/SAE/<YYMMDD-hh_mm_ss>/
   config.json         # SAE settings, source path, dimensions, package versions
   hparams.yaml
-  metrics.csv         # loss, MSE, L1, L0, R², dead neurons, learning rate
+  metrics.csv         # loss, MSE, L1, L0, R², dead neurons, optional reanimation loss, learning rate
   split_indices.pt    # train/val indices into the source embeddings tensor
   model.pt            # final SAE architecture, weights and inference threshold
   last.ckpt           # final Lightning checkpoint, including optimizer state
@@ -291,6 +305,12 @@ python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
 # Use image-pair coherence to rank neighbors:
 python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
   --tversky-mode coherence --coherence-pairs 64
+# Rank by the cosine of SAE decoder vectors:
+python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
+  --tversky-mode decoder_cosine
+# Run a seeded random-neighborhood baseline:
+python main_steering.py --sae-log-dir log_dir/<image-run>/SAE/<sae-run> \
+  --tversky-mode random
 ```
 
 The runner fits one linear classifier to the exported original training
@@ -309,6 +329,14 @@ pair. It converts each image to the set of *all* SAE latents with positive code,
 computes Tversky similarity between those binary sets, and averages the
 scores. A latent pair whose supports contain only the same image scores zero.
 The resulting ranking feeds the same neighborhood ablation evaluation.
+`decoder_cosine` ranks latents by the cosine similarity of their decoder weight
+vectors (one dictionary row per latent). A zero decoder vector gets similarity
+zero. `random` replaces those scores with independent uniform values in
+`[0, 1)` for latent pairs, seeded by `seed` and symmetric between sampled
+anchors. Both modes keep the same eligible-latent filter, tie-breaking, and
+group-steering evaluation. The selected mode and similarity scores are saved
+with the steering results. The `tversky_penalty` and `coherence_pairs` settings
+apply only to the Tversky modes.
 
 Ablation zeros the neighborhood's codes, decodes the result, and passes it to
 the fixed classifier. Accuracy drops are measured against the unmodified SAE

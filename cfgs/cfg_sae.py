@@ -1,6 +1,7 @@
 """Configuration for SAE training and neighborhood steering evaluation."""
 
 from dataclasses import asdict, dataclass, field
+from math import isfinite
 from pathlib import Path
 
 from cfgs.cfg import ROOT_DIR, SchedulerConfig
@@ -15,6 +16,9 @@ class SAEConfig:
     concept_expansion_factor: int = 4
     top_k: int = 32  # Per sample; batch_topk uses batch_size * top_k globally.
     l1_coefficient: float = 1e-3  # Applied only to basic SAE.
+    dead_neuron_reanimation: bool = False
+    reanimation_loss_coefficient: float = 0.1
+    reanimation_top_k: int = 32  # Dormant candidates selected per image for auxiliary reconstruction.
     threshold_momentum: float = 0.9
     epochs: int = 50
     batch_size: int = 256
@@ -65,6 +69,14 @@ class SAEConfig:
             raise ValueError("validation_fraction must be between 0 and 1.")
         if not 0 <= self.threshold_momentum < 1 or self.l1_coefficient < 0:
             raise ValueError("Require momentum in [0, 1) and nonnegative L1 coefficient.")
+        if type(self.dead_neuron_reanimation) is not bool:
+            raise ValueError("dead_neuron_reanimation must be a boolean.")
+        if (type(self.reanimation_loss_coefficient) not in (int, float)
+                or not isfinite(self.reanimation_loss_coefficient)
+                or self.reanimation_loss_coefficient <= 0):
+            raise ValueError("reanimation_loss_coefficient must be finite and positive.")
+        if type(self.reanimation_top_k) is not int or self.reanimation_top_k < 1:
+            raise ValueError("reanimation_top_k must be a positive integer.")
         if self.learning_rate <= 0 or self.weight_decay < 0 or self.print_every_n_epochs < 1:
             raise ValueError("Invalid learning rate, weight decay, or print interval.")
 
@@ -84,7 +96,7 @@ class SteeringConfig:
     max_anchors: int | None = 128  # None evaluates every latent with nonempty support.
     max_neighborhood_size: int = 8  # Every size from 1 through this value is evaluated.
     tversky_penalty: float = 0.5  # Equal penalty for each one-sided support difference.
-    tversky_mode: str = "support"  # support, coherence
+    tversky_mode: str = "support"  # support, coherence, decoder_cosine, random
     coherence_pairs: int = 64  # Distinct image pairs sampled per latent pair in coherence mode.
     classifier_epochs: int = 100
     classifier_batch_size: int = 1024
@@ -106,8 +118,8 @@ class SteeringConfig:
             raise ValueError("Neighborhood size and evaluation batch size must be positive.")
         if not 0 < self.tversky_penalty <= 1:
             raise ValueError("tversky_penalty must be in (0, 1].")
-        if self.tversky_mode not in {"support", "coherence"}:
-            raise ValueError("tversky_mode must be support or coherence.")
+        if self.tversky_mode not in {"support", "coherence", "decoder_cosine", "random"}:
+            raise ValueError("tversky_mode must be support, coherence, decoder_cosine, or random.")
         if type(self.coherence_pairs) is not int or self.coherence_pairs < 1:
             raise ValueError("coherence_pairs must be a positive integer.")
         if self.classifier_epochs < 1 or self.classifier_batch_size < 1:

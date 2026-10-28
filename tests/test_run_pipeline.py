@@ -39,6 +39,9 @@ class RunPipelineTest(unittest.TestCase):
             self.assertEqual(config.model_name, "topk")
             self.assertEqual(config.concept_expansion_factor, 2)
             self.assertEqual(config.top_k, 4)
+            self.assertTrue(config.dead_neuron_reanimation)
+            self.assertEqual(config.reanimation_loss_coefficient, 0.2)
+            self.assertEqual(config.reanimation_top_k, 2)
             self.assertEqual(config.model_log_dir, str(image_run))
             return sae_run
 
@@ -65,7 +68,9 @@ class RunPipelineTest(unittest.TestCase):
             "image": {"root_dir": self.root, "log_dir": "experiments",
                       "model_name": "dino", "augments": {"image_size": 384},
                       "scheduler": {"patience": 2}},
-            "sae": {"model_name": "topk", "concept_expansion_factor": 2, "top_k": 4},
+            "sae": {"model_name": "topk", "concept_expansion_factor": 2, "top_k": 4,
+                    "dead_neuron_reanimation": True,
+                    "reanimation_loss_coefficient": 0.2, "reanimation_top_k": 2},
             "steering": {"max_anchors": 5, "max_neighborhood_size": 3,
                          "tversky_mode": "coherence", "coherence_pairs": 7},
             "inference": {"top_active_images": 2, "stitch_images": False},

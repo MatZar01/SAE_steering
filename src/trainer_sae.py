@@ -26,8 +26,10 @@ class SAETrainer(pl.LightningModule):
                                  threshold_momentum=config.threshold_momentum)
         self.model = build_sae(**self.architecture)
         self.save_hyperparameters({"config": config.to_dict(), "architecture": self.architecture})
-        self.register_buffer("train_totals", torch.zeros(6, dtype=torch.float64), persistent=False)
-        self.register_buffer("eval_totals", torch.zeros(6, dtype=torch.float64), persistent=False)
+        self.register_buffer("train_totals", torch.zeros(7, dtype=torch.float64), persistent=False)
+        self.register_buffer("eval_totals", torch.zeros(7, dtype=torch.float64), persistent=False)
+        self.register_buffer("dead_neuron_mask", torch.zeros(self.architecture["nb_concepts"],
+                                                               dtype=torch.bool), persistent=False)
         for split in ("train", "eval"):
             self.register_buffer(f"{split}_input_sum", torch.zeros(input_dim, dtype=torch.float64),
                                  persistent=False)
@@ -40,22 +42,46 @@ class SAETrainer(pl.LightningModule):
     def forward(self, embeddings):
         return self.model(embeddings)
 
+    def _reanimation_loss(self, x, pre_codes, codes, reconstructed):
+        """Use dormant codes to reconstruct the detached residual from the main SAE."""
+        self.dead_neuron_mask &= ~(codes.detach() > 0).any(dim=0)
+        dead_indices = self.dead_neuron_mask.nonzero(as_tuple=True)[0]
+        if len(dead_indices) == 0:
+            return x.new_zeros(())
+        candidates = pre_codes[:, dead_indices]
+        k = min(self.config.reanimation_top_k, len(dead_indices))
+        values, positions = candidates.topk(k, dim=1)
+        auxiliary_codes = torch.zeros_like(codes)
+        auxiliary_codes.scatter_(1, dead_indices[positions], F.softplus(values))
+        residual = (x - reconstructed).detach()
+        return F.mse_loss(self.model.decode(auxiliary_codes), residual)
+
     def _step(self, batch, totals, split):
         x = batch[0]
-        _, codes, reconstructed = self(x)
+        pre_codes, codes, reconstructed = self(x)
         mse = F.mse_loss(reconstructed, x)
         l1 = codes.abs().sum(dim=1).mean()
         loss = mse + (self.config.l1_coefficient * l1 if self.config.model_name == "basic" else 0)
+        reanimation = x.new_zeros(())
+        if split == "train" and self.config.dead_neuron_reanimation:
+            reanimation = self._reanimation_loss(x, pre_codes, codes, reconstructed)
+            loss = loss + self.config.reanimation_loss_coefficient * reanimation
         l0 = (codes.detach() != 0).float().sum(dim=1).mean()
         totals[:4] += torch.stack([loss.detach(), mse.detach(), l1.detach(), l0]).double() * len(x)
         totals[4] += len(x)
         totals[5] += (reconstructed.detach().double() - x.detach().double()).square().sum()
+        totals[6] += reanimation.detach().double() * len(x)
         getattr(self, f"{split}_input_sum").add_(x.detach().double().sum(dim=0))
         getattr(self, f"{split}_input_squared").add_(x.detach().double().square().sum(dim=0))
         getattr(self, f"{split}_active_counts").add_((codes.detach() > 0).sum(dim=0))
         return loss
 
     def on_train_epoch_start(self):
+        if self.config.dead_neuron_reanimation:
+            if self.current_epoch > 0:
+                self.dead_neuron_mask.copy_(self.train_active_counts == 0)
+            else:
+                self.dead_neuron_mask.zero_()
         self.train_totals.zero_()
         self.train_input_sum.zero_()
         self.train_input_squared.zero_()
@@ -84,6 +110,8 @@ class SAETrainer(pl.LightningModule):
     def _log_totals(self, name, totals):
         for metric, value in zip(("loss", "mse", "l1", "l0"), totals[:4] / totals[4]):
             self.log(f"{name}_{metric}", value)
+        if name == "train" and self.config.dead_neuron_reanimation:
+            self.log("train_reanimation_loss", totals[6] / totals[4])
         r2, dead_neurons = self._quality_metrics(name, totals)
         self.log(f"{name}_r2", r2)
         self.log(f"{name}_dead_neurons", dead_neurons.float())
@@ -99,8 +127,11 @@ class SAETrainer(pl.LightningModule):
             train = (self.train_totals[:4] / self.train_totals[4]).tolist()
             val = (self.eval_totals[:4] / self.eval_totals[4]).tolist()
             eval_r2, eval_dead = self._quality_metrics("eval", self.eval_totals)
+            reanimation_text = (f"reanimation={self.train_totals[6] / self.train_totals[4]:.6f} "
+                                if self.config.dead_neuron_reanimation else "")
             print(f"Epoch {self.current_epoch + 1:03d} | train loss={train[0]:.6f} "
                   f"mse={train[1]:.6f} l0={train[3]:.2f} "
+                  f"{reanimation_text}"
                   f"r2={train_r2.item():.4f} dead={train_dead.item()} | "
                   f"val loss={val[0]:.6f} mse={val[1]:.6f} l0={val[3]:.2f} "
                   f"r2={eval_r2.item():.4f} dead={eval_dead.item()}", flush=True)

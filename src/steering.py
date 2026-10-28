@@ -184,6 +184,26 @@ def _coherence_similarity_to_anchors(support: torch.Tensor, activity_masks: list
     return similarity
 
 
+def _decoder_cosine_to_anchors(dictionary: torch.Tensor,
+                               anchors: torch.Tensor) -> torch.Tensor:
+    """Cosine similarity of decoder rows; zero vectors have similarity zero."""
+    directions = F.normalize(dictionary.float(), dim=1)
+    return (directions @ directions[anchors.to(dictionary.device)].T).cpu()
+
+
+def _random_similarity_to_anchors(num_latents: int, anchors: torch.Tensor,
+                                  seed: int) -> torch.Tensor:
+    """Seeded uniform baseline, symmetric for every pair of evaluated anchors."""
+    generator = torch.Generator().manual_seed(seed)
+    similarity = torch.rand((num_latents, len(anchors)), generator=generator)
+    for column, anchor_tensor in enumerate(anchors):
+        anchor = int(anchor_tensor)
+        similarity[anchor, column] = 1.0
+        for earlier, earlier_tensor in enumerate(anchors[:column]):
+            similarity[int(earlier_tensor), column] = similarity[anchor, earlier]
+    return similarity
+
+
 @torch.inference_mode()
 def _test_codes_and_baseline(sae: nn.Module, classifier: nn.Module,
                              embeddings: torch.Tensor, labels: torch.Tensor,
@@ -386,13 +406,18 @@ def run_steering(config: SteeringConfig) -> Path:
     else:
         anchors = eligible
     max_size = min(config.max_neighborhood_size, len(eligible))
+    dictionary = sae.get_dictionary().detach()
     if config.tversky_mode == "coherence":
         similarity = _coherence_similarity_to_anchors(
             support, activity_masks, anchors, config.tversky_penalty,
             config.coherence_pairs, config.seed)
-    else:
+    elif config.tversky_mode == "support":
         similarity = _similarity_to_anchors(support, anchors, config.tversky_penalty,
                                             config.evaluation_batch_size, device)
+    elif config.tversky_mode == "decoder_cosine":
+        similarity = _decoder_cosine_to_anchors(dictionary, anchors)
+    else:
+        similarity = _random_similarity_to_anchors(support.shape[1], anchors, config.seed)
     neighborhoods = []
     for column, anchor_tensor in enumerate(anchors):
         anchor = int(anchor_tensor)
@@ -408,7 +433,6 @@ def run_steering(config: SteeringConfig) -> Path:
     test_codes, reconstructions, baseline_correct, baseline_probability = _test_codes_and_baseline(
         sae, classifier, test_embeddings, test_labels,
         config.evaluation_batch_size, num_classes, device)
-    dictionary = sae.get_dictionary().detach()
     baseline_accuracy = baseline_correct.double() / test_counts.clamp_min(1)
     baseline_overall = baseline_correct.sum().item() / len(test_labels)
     baseline_probability_by_class = baseline_probability / test_counts.clamp_min(1)
@@ -476,14 +500,23 @@ def run_steering(config: SteeringConfig) -> Path:
         "num_non_dead_latents": int((active_count > 0).sum()),
         "num_eligible_latents": len(eligible), "num_sampled_anchors": len(anchors),
         "max_evaluated_size": max_size,
-        "similarity": (
-            "Mean over sampled distinct training-image pairs (x in A's support, y in B's support) "
-            "of |P(x)∩P(y)| / (|P(x)∩P(y)| + penalty*(|P(x)\\P(y)| + |P(y)\\P(x)|)); "
-            "P(x)={k: z_k(x)>0}. Pairs are sampled with replacement using a seed specific to "
-            "each unordered latent pair. Score is zero if only an identical-image pair exists."
-            if config.tversky_mode == "coherence" else
-            "|A∩B| / (|A∩B| + penalty*(|A\\B| + |B\\A|))"
-        ),
+        "similarity": {
+            "support": "|A∩B| / (|A∩B| + penalty*(|A\\B| + |B\\A|))",
+            "coherence": (
+                "Mean over sampled distinct training-image pairs (x in A's support, y in B's support) "
+                "of |P(x)∩P(y)| / (|P(x)∩P(y)| + penalty*(|P(x)\\P(y)| + |P(y)\\P(x)|)); "
+                "P(x)={k: z_k(x)>0}. Pairs are sampled with replacement using a seed specific to "
+                "each unordered latent pair. Score is zero if only an identical-image pair exists."
+            ),
+            "decoder_cosine": (
+                "Cosine similarity of the SAE decoder weight vectors for each latent; "
+                "zero decoder vectors have similarity zero."
+            ),
+            "random": (
+                "Seeded uniform random similarity in [0,1) for each distinct latent pair, "
+                "symmetric between evaluated anchors; diagonal is one."
+            ),
+        }[config.tversky_mode],
         "support": "z_k(x) > mean_train(z_k)",
         "active_state_metrics": (
             "On training images in the union of group supports, use the group's SAE code vector "

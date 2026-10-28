@@ -14,6 +14,10 @@ def main():
     parser.add_argument("--concept-expansion-factor", type=int)
     parser.add_argument("--top-k", type=int)
     parser.add_argument("--l1-coefficient", type=float)
+    parser.add_argument("--dead-neuron-reanimation", action=argparse.BooleanOptionalAction,
+                        default=None)
+    parser.add_argument("--reanimation-loss-coefficient", type=float)
+    parser.add_argument("--reanimation-top-k", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--learning-rate", type=float)
