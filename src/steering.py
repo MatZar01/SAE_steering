@@ -259,25 +259,34 @@ def _ablated_correct_by_size(classifier: nn.Module, codes: torch.Tensor,
     return correct, probability
 
 
-def _neighborhood_variance(embeddings: torch.Tensor, support: torch.Tensor,
-                           neighborhood: list[int]):
-    """Accumulate moments as nested support unions grow."""
+@torch.inference_mode()
+def _embedding_squared_norms(embeddings: torch.Tensor, batch_size: int) -> torch.Tensor:
+    """Cache each image's squared norm for group variance calculations."""
+    norms = torch.empty(len(embeddings), dtype=torch.float64)
+    for start in range(0, len(embeddings), batch_size):
+        end = min(start + batch_size, len(embeddings))
+        norms[start:end] = embeddings[start:end].double().square().sum(dim=1)
+    return norms
+
+
+def _neighborhood_variance(embeddings: torch.Tensor, squared_norms: torch.Tensor,
+                           support: torch.Tensor, neighborhood: list[int]):
+    """Accumulate feature sums and cached squared norms over nested support unions."""
     included = torch.zeros(len(embeddings), dtype=torch.bool)
     count = 0
     total = torch.zeros(embeddings.shape[1], dtype=torch.float64)
-    squared_total = torch.zeros_like(total)
+    squared_total = torch.zeros((), dtype=torch.float64)
     for latent in neighborhood:
         new = support[:, latent] & ~included
         included |= new
         if new.any():
-            values = embeddings[new].double()
+            values = embeddings[new]
             count += len(values)
-            total += values.sum(dim=0)
-            squared_total += values.square().sum(dim=0)
-        mean = total / count
-        per_dimension_variance = (squared_total / count - mean.square()).clamp_min(0)
-        yield (count, per_dimension_variance.mean().item(),
-               per_dimension_variance.sum().item())
+            total += values.sum(dim=0, dtype=torch.float64)
+            squared_total += squared_norms[new].sum()
+        # Sum_d Var(x_d) = E[||x||^2] - ||E[x]||^2.
+        total_variance = (squared_total / count - (total / count).square().sum()).clamp_min(0).item()
+        yield count, total_variance / embeddings.shape[1], total_variance, included
 
 
 @torch.inference_mode()
@@ -295,10 +304,14 @@ def _selected_training_codes(sae: nn.Module, embeddings: torch.Tensor,
 
 
 def _active_state_metrics(codes: torch.Tensor, support: torch.Tensor,
-                          neighborhood: list[int], columns: dict[int, int]):
+                          neighborhood: list[int], columns: dict[int, int],
+                          active: torch.Tensor | None = None):
     """Population code variance and mean pairwise cosine on group support."""
-    active = support[:, neighborhood].any(dim=1)
-    states = codes[active][:, [columns[latent] for latent in neighborhood]].double()
+    if active is None:
+        active = support[:, neighborhood].any(dim=1)
+    # Select the few group columns before filtering rows; other cached latents
+    # can number in the thousands for random or decoder-cosine neighborhoods.
+    states = codes[:, [columns[latent] for latent in neighborhood]][active].double()
     variance = states.var(dim=0, unbiased=False).mean().item()
     lengths = torch.linalg.vector_norm(states, dim=1)
     nonzero = lengths > 0
@@ -433,6 +446,7 @@ def run_steering(config: SteeringConfig) -> Path:
     test_codes, reconstructions, baseline_correct, baseline_probability = _test_codes_and_baseline(
         sae, classifier, test_embeddings, test_labels,
         config.evaluation_batch_size, num_classes, device)
+    squared_norms = _embedding_squared_norms(train_embeddings, config.evaluation_batch_size)
     baseline_accuracy = baseline_correct.double() / test_counts.clamp_min(1)
     baseline_overall = baseline_correct.sum().item() / len(test_labels)
     baseline_probability_by_class = baseline_probability / test_counts.clamp_min(1)
@@ -448,12 +462,12 @@ def run_steering(config: SteeringConfig) -> Path:
         target = min(observed_classes, key=lambda idx: (-first_drop[idx].item(), idx))
         for size, (correct, probability, variance) in enumerate(zip(correct_by_size,
                 probability_by_size,
-                _neighborhood_variance(train_embeddings, support, neighborhood)), start=1):
+                _neighborhood_variance(train_embeddings, squared_norms, support, neighborhood)), start=1):
             drops = baseline_accuracy - correct.double() / test_counts.clamp_min(1)
             probability_drops = baseline_probability_by_class - probability / test_counts.clamp_min(1)
-            support_size, mean_variance, total_variance = variance
+            support_size, mean_variance, total_variance, included = variance
             active_variance, active_cosine = _active_state_metrics(
-                train_codes, support, neighborhood[:size], code_columns)
+                train_codes, support, neighborhood[:size], code_columns, active=included)
             rows.append({
                 "anchor": anchor, "size": size,
                 "latents": "|".join(map(str, neighborhood[:size])),

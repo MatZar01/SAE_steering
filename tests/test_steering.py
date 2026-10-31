@@ -13,7 +13,8 @@ from torch import nn
 from cfgs.cfg_sae import SteeringConfig
 from src.models_sae import build_sae, load_sae
 from src.steering import (_active_state_metrics, _coherence_similarity_to_anchors,
-                          _decoder_cosine_to_anchors, _random_similarity_to_anchors,
+                          _decoder_cosine_to_anchors, _embedding_squared_norms,
+                          _neighborhood_variance, _random_similarity_to_anchors,
                           run_steering)
 
 
@@ -63,6 +64,30 @@ class SteeringTest(unittest.TestCase):
         variance, cosine = _active_state_metrics(codes, support, [0, 1], columns)
         self.assertAlmostEqual(variance, 0.625)
         self.assertAlmostEqual(cosine, 0.0)
+
+        wide_codes = torch.tensor([[2.0, 99.0, 0.0], [0.0, 99.0, 1.0]])
+        wide_support = wide_codes[:, [0, 2]] > 0
+        variance, cosine = _active_state_metrics(
+            wide_codes, wide_support, [0, 1], {0: 0, 1: 2})
+        self.assertAlmostEqual(variance, 0.625)
+        self.assertAlmostEqual(cosine, 0.0)
+
+    def test_cached_embedding_norms_preserve_group_variance(self):
+        embeddings = torch.tensor([[1.0, 2.0, 3.0], [2.0, 0.0, 4.0],
+                                   [3.0, 4.0, 5.0], [8.0, 1.0, 2.0]])
+        support = torch.tensor([[True, False, False], [True, True, False],
+                                [False, True, False], [False, False, True]])
+        neighborhood = [0, 1, 2]
+        norms = _embedding_squared_norms(embeddings, batch_size=2)
+        for size, (count, mean_variance, total_variance, included) in enumerate(
+                _neighborhood_variance(embeddings, norms, support, neighborhood), start=1):
+            expected_mask = support[:, neighborhood[:size]].any(dim=1)
+            expected_variance = embeddings[expected_mask].double().var(
+                dim=0, unbiased=False)
+            torch.testing.assert_close(included, expected_mask)
+            self.assertEqual(count, int(expected_mask.sum()))
+            self.assertAlmostEqual(total_variance, expected_variance.sum().item())
+            self.assertAlmostEqual(mean_variance, expected_variance.mean().item())
 
     def test_coherence_uses_full_image_activity_and_excludes_identical_pairs(self):
         support = torch.eye(3, dtype=torch.bool)
